@@ -1,0 +1,6 @@
+.build/
+.DS_Store
+__MACOSX/
+Syphon.SDK.5.zip
+*.ips
+*.crash
