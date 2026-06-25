@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var browser:         EpocCamBrowser!
     private var syphon:          SyphonBridge!
     private var statusItem:      NSTextField!
+    private var statusOverlay:   NSView!
     private var resolutionMenu:  NSMenu?
     private var activeFormatIndex = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastFormatKey)
 
@@ -85,17 +86,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         videoView.autoresizingMask = [.width, .height]
         content.addSubview(videoView)
 
-        // Status label shown until first frame arrives
+        // Semi-transparent overlay shown when not streaming (search, disconnect, etc.)
+        let pill = NSView()
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
+        pill.layer?.cornerRadius = 10
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(pill)
+
         let label = NSTextField(labelWithString: "Searching for EpocCam…")
         label.textColor = .white
         label.alignment = .center
+        label.font = NSFont.systemFont(ofSize: 16, weight: .medium)
         label.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(label)
+        pill.addSubview(label)
+
         NSLayoutConstraint.activate([
-            label.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            label.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            pill.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            pill.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 20),
+            label.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -20),
+            label.topAnchor.constraint(equalTo: pill.topAnchor, constant: 12),
+            label.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -12),
         ])
+
         statusItem = label
+        statusOverlay = pill
     }
 
     // MARK: - Frame-rate meter
@@ -140,15 +156,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         browser.onStatus = { [weak self] msg in
             // Already dispatched to main thread by Browser
-            self?.statusItem.stringValue = msg
+            guard let self else { return }
+            self.statusItem.stringValue = msg
+            self.statusOverlay.isHidden = false
         }
         browser.onFrame = { [weak self] pixelBuffer in
             guard let self else { return }
             self.recordFrame()
-            // Hide status label on first frame
             DispatchQueue.main.async {
-                if self.statusItem.isHidden == false {
-                    self.statusItem.isHidden = true
+                if self.statusOverlay.isHidden == false {
+                    self.statusOverlay.isHidden = true
                 }
             }
             self.videoView.display(pixelBuffer: pixelBuffer)

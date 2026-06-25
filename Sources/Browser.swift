@@ -187,7 +187,7 @@ final class EpocCamBrowser {
         c.onDisconnect = { [weak self] in
             guard let self else { return }
             self.connection = nil
-            self.postStatus("Disconnected – reconnecting…")
+            self.postStatus("Connection lost – reconnecting…")
             NSLog("EpocCam disconnected – reconnecting in 1s")
             self.scheduleReconnect(delay: 1.0)
         }
