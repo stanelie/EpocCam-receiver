@@ -5,7 +5,8 @@ import CoreVideo
 // Continuously browses for _epoccam._tcp services and maintains one connection.
 // Falls back to the last known host (stored in UserDefaults) if mDNS is slow.
 final class EpocCamBrowser {
-    var onFrame: ((CVPixelBuffer) -> Void)?
+    var onFrame:   ((CVPixelBuffer) -> Void)?
+    var onFormats: (([VideoFormat]) -> Void)?
 
     private var browser:    NWBrowser?
     private var connection: EpocCamConnection?
@@ -22,6 +23,12 @@ final class EpocCamBrowser {
     func start() {
         startBrowser()
         scheduleStartupFallbacks()
+    }
+
+    func selectFormat(index: Int) {
+        queue.async { [weak self] in
+            self?.connection?.selectFormat(index: index)
+        }
     }
 
     func stop() {
@@ -108,7 +115,8 @@ final class EpocCamBrowser {
 
     private func connect(to endpoint: NWEndpoint) {
         let c = EpocCamConnection(endpoint: endpoint, queue: queue)
-        c.onFrame = { [weak self] pb in self?.onFrame?(pb) }
+        c.onFrame   = { [weak self] pb in self?.onFrame?(pb) }
+        c.onFormats = { [weak self] formats in self?.onFormats?(formats) }
         c.onConnected = { [weak self] resolvedEndpoint in
             guard let self else { return }
             // Cancel any pending startup fallback timers — we have a live connection.

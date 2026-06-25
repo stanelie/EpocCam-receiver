@@ -7,14 +7,16 @@ import Network
 final class EpocCamConnection {
     var onFrame:      ((CVPixelBuffer) -> Void)?
     var onDisconnect: (() -> Void)?
-    // Called once when connection becomes ready; passes the resolved remote endpoint (hostPort) if available.
     var onConnected:  ((NWEndpoint?) -> Void)?
+    // Called once the capability packet is parsed; passes the available formats.
+    var onFormats:    (([VideoFormat]) -> Void)?
 
     private let conn:    NWConnection
     private let queue:   DispatchQueue
     private var buffer   = Data()
     private let decoder  = VideoDecoder()
     private var live     = false
+    private var activeFormatIndex: Int = 0
 
     init(endpoint: NWEndpoint, queue: DispatchQueue) {
         self.queue = queue
@@ -116,11 +118,10 @@ final class EpocCamConnection {
         switch header.type {
         case PktType.capability.rawValue:
             NSLog("EpocCam: capability packet received (%d bytes payload), sending format-select", payload.count)
-            let pkt = Data.formatSelectPacket(index: 0)
-            conn.send(content: pkt, completion: .contentProcessed { err in
-                if let err { NSLog("EpocCam: format-select send error: %@", err.localizedDescription) }
-                else { NSLog("EpocCam: format-select sent (index 0)") }
-            })
+            let formats = parseCapabilityFormats(payload)
+            NSLog("EpocCam: advertised formats: %@", formats.map { $0.label }.joined(separator: ", "))
+            if !formats.isEmpty { onFormats?(formats) }
+            sendFormatSelect(index: 0)
 
         case PktType.video.rawValue:
             decoder.handle(payload: payload, flags: header.flags)
@@ -128,5 +129,19 @@ final class EpocCamConnection {
         default:
             NSLog("EpocCam: unknown packet type 0x%08X (%d bytes)", header.type, payload.count)
         }
+    }
+
+    func selectFormat(index: Int) {
+        guard live else { return }
+        activeFormatIndex = index
+        sendFormatSelect(index: index)
+    }
+
+    private func sendFormatSelect(index: Int) {
+        let pkt = Data.formatSelectPacket(index: UInt16(index))
+        conn.send(content: pkt, completion: .contentProcessed { err in
+            if let err { NSLog("EpocCam: format-select send error: %@", err.localizedDescription) }
+            else { NSLog("EpocCam: format-select sent (index %d)", index) }
+        })
     }
 }

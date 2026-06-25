@@ -2,11 +2,13 @@ import AppKit
 import CoreVideo
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var window:     NSWindow!
-    private var videoView:  VideoView!
-    private var browser:    EpocCamBrowser!
-    private var syphon:     SyphonBridge!
-    private var statusItem: NSTextField!
+    private var window:          NSWindow!
+    private var videoView:       VideoView!
+    private var browser:         EpocCamBrowser!
+    private var syphon:          SyphonBridge!
+    private var statusItem:      NSTextField!
+    private var resolutionMenu:  NSMenu?
+    private var activeFormatIndex = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -20,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func buildMenu() {
         let mainMenu = NSMenu()
+
+        // App menu
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
@@ -27,7 +31,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(NSApplication.terminate(_:)),
                         keyEquivalent: "q")
         appMenuItem.submenu = appMenu
+
+        // Resolution menu (starts empty; populated when sender advertises formats)
+        let resMenuItem = NSMenuItem()
+        resMenuItem.title = "Resolution"
+        mainMenu.addItem(resMenuItem)
+        let resMenu = NSMenu(title: "Resolution")
+        let placeholder = NSMenuItem(title: "Connecting…", action: nil, keyEquivalent: "")
+        placeholder.isEnabled = false
+        resMenu.addItem(placeholder)
+        resMenuItem.submenu = resMenu
+        resolutionMenu = resMenu
+
         NSApp.mainMenu = mainMenu
+    }
+
+    // Called on main thread when the sender advertises its available formats.
+    private func populateResolutionMenu(formats: [VideoFormat]) {
+        guard let menu = resolutionMenu else { return }
+        menu.removeAllItems()
+        for fmt in formats {
+            let item = NSMenuItem(title: fmt.label,
+                                  action: #selector(resolutionSelected(_:)),
+                                  keyEquivalent: "")
+            item.tag = fmt.index
+            item.state = fmt.index == activeFormatIndex ? .on : .off
+            menu.addItem(item)
+        }
+    }
+
+    @objc private func resolutionSelected(_ sender: NSMenuItem) {
+        let idx = sender.tag
+        guard idx != activeFormatIndex else { return }
+        activeFormatIndex = idx
+        // Update checkmarks
+        resolutionMenu?.items.forEach { $0.state = $0.tag == idx ? .on : .off }
+        browser.selectFormat(index: idx)
+        NSLog("EpocCam: user selected format index %d", idx)
     }
 
     private func buildWindow() {
@@ -95,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         syphon = SyphonBridge(serverName: "EpocCam")
 
         browser = EpocCamBrowser()
+        browser.onFormats = { [weak self] formats in
+            DispatchQueue.main.async { self?.populateResolutionMenu(formats: formats) }
+        }
         browser.onFrame = { [weak self] pixelBuffer in
             guard let self else { return }
             self.recordFrame()

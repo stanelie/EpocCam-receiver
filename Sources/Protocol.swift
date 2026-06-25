@@ -35,6 +35,43 @@ struct PktHeader {
     }
 }
 
+// A single resolution/codec format advertised in the capability packet.
+struct VideoFormat {
+    let index:  Int
+    let width:  Int
+    let height: Int
+    let fps:    Float
+
+    var label: String {
+        let fpsStr = fps > 0 ? " @ \(Int(fps))fps" : ""
+        return "\(width)×\(height)\(fpsStr)"
+    }
+}
+
+// Parse the formats from a capability packet payload.
+// Layout: [0-3] numFormats LE, then numFormats × 8 bytes each:
+//   [0-3] VideoSize: bits 0-11 = width, bits 12-23 = height, bits 24-31 = codec
+//   [4-7] frame rate as little-endian float32
+func parseCapabilityFormats(_ payload: Data) -> [VideoFormat] {
+    let bytes = payload.startIndex == 0 ? payload : Data(payload)
+    guard bytes.count >= 4 else { return [] }
+    let count = Int(bytes.leU32(0))
+    guard count > 0, count <= 16 else { return [] }
+    var formats: [VideoFormat] = []
+    for i in 0..<count {
+        let offset = 4 + i * 8
+        guard offset + 8 <= bytes.count else { break }
+        let vs   = bytes.leU32(offset)
+        let w    = Int(vs & 0xFFF)
+        let h    = Int((vs >> 12) & 0xFFF)
+        let fpsRaw = bytes.leU32(offset + 4)
+        let fps  = Float(bitPattern: fpsRaw)
+        guard w > 0, h > 0 else { continue }
+        formats.append(VideoFormat(index: i, width: w, height: h, fps: fps))
+    }
+    return formats
+}
+
 let kFlagConfig: UInt32 = 0x08
 let kFlagFront:  UInt32 = 0x10
 let kResetPayload        = Data([0x00, 0x00, 0x00, 0x05])
