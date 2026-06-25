@@ -31,7 +31,9 @@ final class VideoView: NSView {
             timebaseOut: &timebase
         )
         if let tb = timebase {
-            CMTimebaseSetTime(tb, time: .zero)
+            // Align timebase with the host clock so frame PTSes (also from the host clock)
+            // are displayed immediately rather than deferred to a far-future time.
+            CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
             CMTimebaseSetRate(tb, rate: 1.0)
             displayLayer.controlTimebase = tb
         }
