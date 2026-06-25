@@ -45,6 +45,11 @@ final class EpocCamConnection {
                 let remote = self.conn.currentPath?.remoteEndpoint
                 NSLog("EpocCam: conn ready, remote=%@", remote.map { "\($0)" } ?? "nil")
                 self.onConnected?(remote)
+                // Send format-select immediately so senders that require a viewer
+                // greeting before streaming (e.g. original iOS EpocCam) start up.
+                // Android senders ignore this early one and respond to the one sent
+                // after the capability packet instead.
+                self.sendFormatSelect(index: self.activeFormatIndex)
                 self.receive()
             case .waiting(let err):
                 NSLog("EpocCam: conn waiting: %@", err.localizedDescription)
