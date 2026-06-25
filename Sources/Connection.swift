@@ -52,14 +52,9 @@ final class EpocCamConnection {
                 self.sendFormatSelect(index: self.activeFormatIndex)
                 self.receive()
             case .waiting(let err):
+                // Logged only — the 4s startup timeout in start() handles cancellation
+                // so we don't fire onDisconnect twice (once here, once from the timeout).
                 NSLog("EpocCam: conn waiting: %@", err.localizedDescription)
-                guard !self.live else { return }
-                // Connection was refused before ever going ready — retry after a short delay.
-                queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                    guard let self, !self.live else { return }
-                    self.conn.cancel()
-                    self.onDisconnect?()
-                }
             case .failed(let err):
                 NSLog("EpocCam: conn failed: %@", err.localizedDescription)
                 guard self.live else { return }
