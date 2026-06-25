@@ -12,6 +12,7 @@ final class EpocCamBrowser {
 
     private var browser:             NWBrowser?
     private var connection:          EpocCamConnection?
+    private var connectionIsLive     = false
     private var endpoints:           [NWEndpoint] = []
     private let queue = DispatchQueue(label: "epoccam.browser", qos: .userInitiated)
     private var activeFormatIndex: Int = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastFormatKey)
@@ -78,6 +79,14 @@ final class EpocCamBrowser {
                         self.endpoints.append(result.endpoint)
                     }
                     if self.connection == nil {
+                        self.connect(to: result.endpoint)
+                    } else if !self.connectionIsLive {
+                        // A new device appeared while we were still connecting to a stale
+                        // host (e.g. last-known-host after sender switch). Switch immediately.
+                        NSLog("EpocCam: new mDNS device while connecting – switching to it")
+                        self.connection?.cancel()
+                        self.connection = nil
+                        self.cancelPendingWork()
                         self.connect(to: result.endpoint)
                     }
                 case .removed(let result):
@@ -179,6 +188,7 @@ final class EpocCamBrowser {
         c.onFormats = { [weak self] formats in self?.onFormats?(formats) }
         c.onConnected = { [weak self] resolvedEndpoint in
             guard let self else { return }
+            self.connectionIsLive = true
             // Cancel any pending startup fallback timers — we have a live connection.
             self.cancelPendingWork()
             self.postStatus("Device connected – receiving video…")
@@ -186,6 +196,7 @@ final class EpocCamBrowser {
         }
         c.onDisconnect = { [weak self] in
             guard let self else { return }
+            self.connectionIsLive = false
             self.connection = nil
             self.postStatus("Connection lost – reconnecting…")
             NSLog("EpocCam disconnected – reconnecting in 1s")
