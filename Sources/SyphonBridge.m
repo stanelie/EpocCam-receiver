@@ -81,7 +81,7 @@
                    textureTarget:GL_TEXTURE_RECTANGLE
                      imageRegion:NSMakeRect(0, 0, w, h)
                textureDimensions:NSMakeSize(w, h)
-                         flipped:NO];
+                         flipped:YES];
 
     CGLUnlockContext(_ctx);
     CGLSetCurrentContext(NULL);
