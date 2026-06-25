@@ -141,7 +141,9 @@ final class EpocCamBrowser {
     private func scheduleReconnect(delay: Double) {
         let w = DispatchWorkItem { [weak self] in
             guard let self, self.connection == nil else { return }
-            if let ep = self.endpoints.first {
+            // Use the most recently added endpoint — if a new sender appeared while
+            // we were trying an old one, it will be at the end of the list.
+            if let ep = self.endpoints.last {
                 NSLog("EpocCam: reconnecting via mDNS endpoint")
                 self.connect(to: ep)
             } else if let host = UserDefaults.standard.string(forKey: EpocCamBrowser.kLastHostKey) {
