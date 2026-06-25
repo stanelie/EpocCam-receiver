@@ -73,7 +73,6 @@ final class EpocCamBrowser {
                         self.endpoints.append(result.endpoint)
                     }
                     if self.connection == nil {
-                        self.postStatus("Found device – connecting…")
                         self.connect(to: result.endpoint)
                     }
                 case .removed(let result):
@@ -175,7 +174,7 @@ final class EpocCamBrowser {
             guard let self else { return }
             // Cancel any pending startup fallback timers — we have a live connection.
             self.cancelPendingWork()
-            self.postStatus("Connected – receiving video…")
+            self.postStatus("Device connected – receiving video…")
             if let ep = resolvedEndpoint { self.recordSuccessfulHost(ep) }
         }
         c.onDisconnect = { [weak self] in

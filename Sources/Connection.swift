@@ -25,6 +25,15 @@ final class EpocCamConnection {
     }
 
     func start() {
+        // Cancel unresolved connections after 8s so the reconnect loop can try again.
+        // NWConnection can stay in .preparing indefinitely on a stale mDNS cache entry.
+        queue.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            guard let self, !self.live else { return }
+            NSLog("EpocCam: connection timeout – cancelling")
+            self.conn.cancel()
+            self.onDisconnect?()
+        }
+
         conn.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             NSLog("EpocCam: conn state -> %@", "\(state)")
