@@ -18,7 +18,8 @@ final class EpocCamConnection {
     private var live     = false
     private var activeFormatIndex: Int = 0
 
-    init(endpoint: NWEndpoint, queue: DispatchQueue) {
+    init(endpoint: NWEndpoint, queue: DispatchQueue, initialFormatIndex: Int = 0) {
+        self.activeFormatIndex = initialFormatIndex
         self.queue = queue
         conn = NWConnection(to: endpoint, using: .tcp)
         decoder.onFrame = { [weak self] pb in self?.onFrame?(pb) }
@@ -130,7 +131,7 @@ final class EpocCamConnection {
             let formats = parseCapabilityFormats(payload)
             NSLog("EpocCam: advertised formats: %@", formats.map { $0.label }.joined(separator: ", "))
             if !formats.isEmpty { onFormats?(formats) }
-            sendFormatSelect(index: 0)
+            sendFormatSelect(index: activeFormatIndex)
 
         case PktType.video.rawValue:
             decoder.handle(payload: payload, flags: header.flags)

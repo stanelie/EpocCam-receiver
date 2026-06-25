@@ -10,10 +10,11 @@ final class EpocCamBrowser {
     // Fired on main thread with a human-readable status string.
     var onStatus:  ((String) -> Void)?
 
-    private var browser:    NWBrowser?
-    private var connection: EpocCamConnection?
-    private var endpoints:  [NWEndpoint] = []
+    private var browser:             NWBrowser?
+    private var connection:          EpocCamConnection?
+    private var endpoints:           [NWEndpoint] = []
     private let queue = DispatchQueue(label: "epoccam.browser", qos: .userInitiated)
+    private var activeFormatIndex:   Int = 0
 
     // Pending fallback work items; cancelled once a connection becomes ready.
     private var pendingWork: [DispatchWorkItem] = []
@@ -29,7 +30,9 @@ final class EpocCamBrowser {
 
     func selectFormat(index: Int) {
         queue.async { [weak self] in
-            self?.connection?.selectFormat(index: index)
+            guard let self else { return }
+            self.activeFormatIndex = index
+            self.connection?.selectFormat(index: index)
         }
     }
 
@@ -167,7 +170,7 @@ final class EpocCamBrowser {
     }
 
     private func connect(to endpoint: NWEndpoint) {
-        let c = EpocCamConnection(endpoint: endpoint, queue: queue)
+        let c = EpocCamConnection(endpoint: endpoint, queue: queue, initialFormatIndex: activeFormatIndex)
         c.onFrame   = { [weak self] pb in self?.onFrame?(pb) }
         c.onFormats = { [weak self] formats in self?.onFormats?(formats) }
         c.onConnected = { [weak self] resolvedEndpoint in
