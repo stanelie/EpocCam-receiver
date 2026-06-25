@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var syphon:          SyphonBridge!
     private var statusItem:      NSTextField!
     private var resolutionMenu:  NSMenu?
-    private var activeFormatIndex = 0
+    private var activeFormatIndex = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastFormatKey)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()

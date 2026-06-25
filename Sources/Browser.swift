@@ -14,14 +14,15 @@ final class EpocCamBrowser {
     private var connection:          EpocCamConnection?
     private var endpoints:           [NWEndpoint] = []
     private let queue = DispatchQueue(label: "epoccam.browser", qos: .userInitiated)
-    private var activeFormatIndex:   Int = 0
+    private var activeFormatIndex: Int = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastFormatKey)
 
     // Pending fallback work items; cancelled once a connection becomes ready.
     private var pendingWork: [DispatchWorkItem] = []
 
-    // Last known host stored across launches
-    private static let kLastHostKey = "EpocCamLastHost"
-    private static let kLastPortKey = "EpocCamLastPort"
+    // Last known host / format stored across launches
+    private static let kLastHostKey   = "EpocCamLastHost"
+    private static let kLastPortKey   = "EpocCamLastPort"
+    static let kLastFormatKey         = "EpocCamLastFormat"
 
     func start() {
         startBrowser()
@@ -32,6 +33,7 @@ final class EpocCamBrowser {
         queue.async { [weak self] in
             guard let self else { return }
             self.activeFormatIndex = index
+            UserDefaults.standard.set(index, forKey: EpocCamBrowser.kLastFormatKey)
             self.connection?.selectFormat(index: index)
         }
     }
