@@ -138,6 +138,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         browser.onFormats = { [weak self] formats in
             DispatchQueue.main.async { self?.populateResolutionMenu(formats: formats) }
         }
+        browser.onStatus = { [weak self] msg in
+            // Already dispatched to main thread by Browser
+            self?.statusItem.stringValue = msg
+        }
         browser.onFrame = { [weak self] pixelBuffer in
             guard let self else { return }
             self.recordFrame()

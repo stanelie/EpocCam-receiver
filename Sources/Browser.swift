@@ -7,6 +7,8 @@ import CoreVideo
 final class EpocCamBrowser {
     var onFrame:   ((CVPixelBuffer) -> Void)?
     var onFormats: (([VideoFormat]) -> Void)?
+    // Fired on main thread with a human-readable status string.
+    var onStatus:  ((String) -> Void)?
 
     private var browser:    NWBrowser?
     private var connection: EpocCamConnection?
@@ -71,6 +73,7 @@ final class EpocCamBrowser {
                         self.endpoints.append(result.endpoint)
                     }
                     if self.connection == nil {
+                        self.postStatus("Found device – connecting…")
                         self.connect(to: result.endpoint)
                     }
                 case .removed(let result):
@@ -82,8 +85,25 @@ final class EpocCamBrowser {
             }
         }
 
-        b.stateUpdateHandler = { state in
+        b.stateUpdateHandler = { [weak self] state in
             NSLog("EpocCam: browser state -> %@", "\(state)")
+            guard let self else { return }
+            switch state {
+            case .failed(let err):
+                NSLog("EpocCam: browser failed: %@ – restarting in 5s", err.localizedDescription)
+                // Browser failed (can happen on macOS 11 if Bonjour is slow to start).
+                // Cancel stale reference and restart.
+                self.browser = nil
+                self.queue.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+                    guard let self else { return }
+                    NSLog("EpocCam: restarting NWBrowser")
+                    self.startBrowser()
+                }
+            case .waiting(let err):
+                NSLog("EpocCam: browser waiting: %@", err.localizedDescription)
+            default:
+                break
+            }
         }
 
         b.start(queue: queue)
@@ -91,19 +111,53 @@ final class EpocCamBrowser {
     }
 
     // On first launch: try last-known-host after 3s if mDNS hasn't found anything.
+    // If there's no saved host either, keep retrying every 5s so a stale mDNS state
+    // doesn't leave the viewer permanently stuck (common on macOS 11 cold boot).
     // Work items are cancelled as soon as a connection goes ready.
-    private func scheduleStartupFallbacks() {
+    private func scheduleStartupFallbacks(delay: Double = 3.0) {
         let w = DispatchWorkItem { [weak self] in
             guard let self, self.connection == nil else { return }
             if let host = UserDefaults.standard.string(forKey: EpocCamBrowser.kLastHostKey) {
                 let rawPort = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastPortKey)
                 let port = rawPort > 0 ? UInt16(rawPort) : kPort
                 NSLog("EpocCam: mDNS slow, trying last known host: %@:%d", host, port)
+                self.postStatus("Trying last known host…")
                 self.connectDirect(host: host, port: port)
+            } else {
+                // No saved host yet — mDNS is our only path; keep polling.
+                NSLog("EpocCam: no last-known host – retrying mDNS in 5s")
+                self.postStatus("Searching for EpocCam… (retrying)")
+                self.scheduleStartupFallbacks(delay: 5.0)
             }
         }
         pendingWork.append(w)
-        queue.asyncAfter(deadline: .now() + 3.0, execute: w)
+        queue.asyncAfter(deadline: .now() + delay, execute: w)
+    }
+
+    private func scheduleReconnect(delay: Double) {
+        let w = DispatchWorkItem { [weak self] in
+            guard let self, self.connection == nil else { return }
+            if let ep = self.endpoints.first {
+                NSLog("EpocCam: reconnecting via mDNS endpoint")
+                self.connect(to: ep)
+            } else if let host = UserDefaults.standard.string(forKey: EpocCamBrowser.kLastHostKey) {
+                let rawPort = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastPortKey)
+                let port = rawPort > 0 ? UInt16(rawPort) : kPort
+                NSLog("EpocCam: reconnecting to last known host: %@:%d", host, port)
+                self.connectDirect(host: host, port: port)
+            } else {
+                // No endpoint yet — mDNS hasn't re-announced; retry in 3s.
+                NSLog("EpocCam: no endpoint for reconnect – retrying in 3s")
+                self.postStatus("Searching for EpocCam…")
+                self.scheduleReconnect(delay: 3.0)
+            }
+        }
+        pendingWork.append(w)
+        queue.asyncAfter(deadline: .now() + delay, execute: w)
+    }
+
+    private func postStatus(_ msg: String) {
+        DispatchQueue.main.async { [weak self] in self?.onStatus?(msg) }
     }
 
     private func connectDirect(host: String, port: UInt16) {
@@ -121,29 +175,15 @@ final class EpocCamBrowser {
             guard let self else { return }
             // Cancel any pending startup fallback timers — we have a live connection.
             self.cancelPendingWork()
+            self.postStatus("Connected – receiving video…")
             if let ep = resolvedEndpoint { self.recordSuccessfulHost(ep) }
         }
         c.onDisconnect = { [weak self] in
             guard let self else { return }
             self.connection = nil
+            self.postStatus("Disconnected – reconnecting…")
             NSLog("EpocCam disconnected – reconnecting in 1s")
-            let w = DispatchWorkItem { [weak self] in
-                guard let self, self.connection == nil else { return }
-                // Prefer a live mDNS endpoint, otherwise use last-known-host.
-                if let ep = self.endpoints.first {
-                    NSLog("EpocCam: reconnecting via mDNS endpoint")
-                    self.connect(to: ep)
-                } else if let host = UserDefaults.standard.string(forKey: EpocCamBrowser.kLastHostKey) {
-                    let rawPort = UserDefaults.standard.integer(forKey: EpocCamBrowser.kLastPortKey)
-                    let port = rawPort > 0 ? UInt16(rawPort) : kPort
-                    NSLog("EpocCam: reconnecting to last known host: %@:%d", host, port)
-                    self.connectDirect(host: host, port: port)
-                } else {
-                    NSLog("EpocCam: no known host, waiting for mDNS")
-                }
-            }
-            self.pendingWork.append(w)
-            self.queue.asyncAfter(deadline: .now() + 1.0, execute: w)
+            self.scheduleReconnect(delay: 1.0)
         }
         c.start()
         connection = c
