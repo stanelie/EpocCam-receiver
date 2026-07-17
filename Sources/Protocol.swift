@@ -4,6 +4,31 @@ let kMagic: UInt32    = 0xDEADC0DE
 let kPort: UInt16     = 5054
 let kService          = "_epoccam._tcp"
 
+// A camera slot. Each slot drives its own Syphon output so Millumin sees two
+// distinct sources. A streamer is bound to a slot by its advertised role (mDNS),
+// and role-less/legacy devices (e.g. the original iPhone) are auto-assigned and
+// then remembered so they always return to the same slot.
+enum CameraSlot: Int, CaseIterable {
+    case a = 0
+    case b = 1
+
+    var label: String { self == .a ? "A" : "B" }
+    var syphonName: String { "EpocCam \(label)" }
+
+    // Per-slot UserDefaults keys (last-known host/port for fast reconnect, last format).
+    var lastHostKey:   String { "EpocCamLastHost.\(label)" }
+    var lastPortKey:   String { "EpocCamLastPort.\(label)" }
+    var lastFormatKey: String { "EpocCamLastFormat.\(label)" }
+
+    static func from(role: String?) -> CameraSlot? {
+        switch role?.lowercased() {
+        case "a": return .a
+        case "b": return .b
+        default:  return nil
+        }
+    }
+}
+
 enum PktType: UInt32 {
     case video      = 0x00020002
     case fmtSelect  = 0x00020003

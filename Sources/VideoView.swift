@@ -39,6 +39,13 @@ final class VideoView: NSView {
         }
     }
 
+    // Clear any displayed frame back to black (e.g. when a slot loses its feed).
+    func clear() {
+        DispatchQueue.main.async { [weak self] in
+            self?.displayLayer.flushAndRemoveImage()
+        }
+    }
+
     // Call from any thread; dispatches to main.
     func display(pixelBuffer: CVPixelBuffer) {
         DispatchQueue.main.async { [weak self] in
