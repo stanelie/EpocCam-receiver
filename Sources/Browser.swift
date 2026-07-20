@@ -20,30 +20,39 @@ final class EpocCamBrowser {
 
     // One managed connection = one phone. Its slot is decided once it's live.
     private final class ManagedConn {
-        let endpoint: NWEndpoint          // endpoint we dialled (mDNS service or direct host)
+        let serviceKey: NWEndpoint        // the discovered mDNS service this represents
+        let endpoint: NWEndpoint          // endpoint we actually dialled (ip or hostname)
         let advertisedId: String?         // stable device id from TXT, if the streamer sent one
         var conn: EpocCamConnection?
         var live = false
+        var everLive = false              // did this connection ever reach .ready?
+        var dropped = false               // teardown started (makes handleDisconnect idempotent)
+        var lastActivity = CFAbsoluteTimeGetCurrent()  // last frame / connect — for the stall watchdog
         var deviceKey: String?            // slot key, known once live
         var slot: CameraSlot?             // published slot, known once assigned
-        init(endpoint: NWEndpoint, advertisedId: String?) {
+        init(serviceKey: NWEndpoint, endpoint: NWEndpoint, advertisedId: String?) {
+            self.serviceKey = serviceKey
             self.endpoint = endpoint
             self.advertisedId = advertisedId
         }
     }
 
-    // What a discovered service resolves to: where to dial, and its stable id (if any).
+    // What a discovered service resolves to. We prefer `primary` (the streamer's advertised
+    // IP — unambiguous even when two Android phones share the "Android.local" hostname), but
+    // fall back to `resolve` (the mDNS service endpoint / hostname) if the IP won't connect —
+    // e.g. it went stale after a Wi-Fi roam. `resolve` is what an IP-less streamer (the
+    // original iPhone) uses from the start.
     private struct Service {
-        let dial: NWEndpoint
+        let primary: NWEndpoint
+        let resolve: NWEndpoint
         let id: String?
     }
 
     private var conns: [ManagedConn] = []
-    // mDNS service endpoint -> resolved Service. The streamer advertises its own IP in a
-    // TXT record; we dial that directly (two Android phones share the "Android.local"
-    // hostname, so resolving the SRV would be ambiguous). Falls back to the service
-    // endpoint for streamers that don't advertise an IP (e.g. the original iPhone).
-    private var discovered: [NWEndpoint: Service] = [:]
+    private var discovered: [NWEndpoint: Service] = [:]   // service endpoint -> Service
+    // service endpoint -> consecutive failures dialling `primary` without ever going live.
+    // Once >0 we try `resolve` (hostname) instead, so a stale advertised IP self-heals.
+    private var primaryFailures: [NWEndpoint: Int] = [:]
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "epoccam.browser", qos: .userInitiated)
     private var pendingWork: [DispatchWorkItem] = []
@@ -52,6 +61,28 @@ final class EpocCamBrowser {
 
     func start() {
         startBrowser()
+        scheduleWatchdog()
+    }
+
+    // A live TCP connection can go silent without a clean close (Wi-Fi roam / phone sleep /
+    // network drop), which would otherwise pin a pool slot forever. Periodically drop any
+    // connection that stopped delivering frames so it reconnects (to the phone's fresh
+    // advertised address).
+    private static let kStallTimeout = 6.0
+    private func scheduleWatchdog() {
+        queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            for mc in self.conns where mc.everLive && !mc.dropped {
+                if now - mc.lastActivity > Self.kStallTimeout {
+                    NSLog("EpocCam: no frames for %.0fs on %@ – dropping stalled connection",
+                          now - mc.lastActivity, mc.deviceKey ?? "?")
+                    mc.conn?.cancel()
+                    self.handleDisconnect(mc)
+                }
+            }
+            self.scheduleWatchdog()
+        }
     }
 
     func stop() {
@@ -148,36 +179,43 @@ final class EpocCamBrowser {
     }
 
     // Dial any discovered services we're not already talking to, up to two connections.
+    // One connection per service; if its advertised IP has been failing, dial the mDNS
+    // hostname instead (self-heals a stale IP).
     private func connectMoreIfPossible() {
-        for svc in discovered.values {
+        for (svcKey, svc) in discovered {
             guard conns.count < 2 else { break }
-            guard !conns.contains(where: { $0.endpoint == svc.dial }) else { continue }
-            connect(to: svc.dial, advertisedId: svc.id)
+            guard !conns.contains(where: { $0.serviceKey == svcKey }) else { continue }
+            let useFallback = (primaryFailures[svcKey] ?? 0) > 0 && svc.resolve != svc.primary
+            let dial = useFallback ? svc.resolve : svc.primary
+            if useFallback { NSLog("EpocCam: advertised IP failing – dialling hostname %@", "\(svc.resolve)") }
+            connect(service: svcKey, to: dial, advertisedId: svc.id)
         }
     }
 
     // Resolve a browse result: prefer the streamer's advertised IP (unambiguous) and
-    // pick up its stable "id"; fall back to the mDNS service endpoint for streamers that
-    // advertise neither (e.g. the original iPhone).
+    // pick up its stable "id"; keep the mDNS service endpoint as the hostname fallback.
+    // A streamer that advertises no IP (the original iPhone) uses the hostname from the start.
     private func service(for result: NWBrowser.Result) -> Service {
-        var dial = result.endpoint
+        let resolve = result.endpoint
+        var primary = result.endpoint
         var id: String? = nil
         if case let .bonjour(txt) = result.metadata {
             if let advertised = txt["id"], !advertised.isEmpty { id = advertised }
             if let ip = txt["ip"], !ip.isEmpty, let port = NWEndpoint.Port(rawValue: kPort) {
-                dial = .hostPort(host: NWEndpoint.Host(ip), port: port)
+                primary = .hostPort(host: NWEndpoint.Host(ip), port: port)
             }
         }
-        return Service(dial: dial, id: id)
+        return Service(primary: primary, resolve: resolve, id: id)
     }
 
-    private func connect(to endpoint: NWEndpoint, advertisedId: String? = nil) {
-        let mc = ManagedConn(endpoint: endpoint, advertisedId: advertisedId)
+    private func connect(service svcKey: NWEndpoint, to endpoint: NWEndpoint, advertisedId: String? = nil) {
+        let mc = ManagedConn(serviceKey: svcKey, endpoint: endpoint, advertisedId: advertisedId)
         conns.append(mc)
 
         let c = EpocCamConnection(endpoint: endpoint, queue: queue, initialFormatIndex: 0)
         c.onFrame = { [weak self, weak mc] pb in
             guard let self, let mc, let slot = mc.slot else { return }
+            mc.lastActivity = CFAbsoluteTimeGetCurrent()
             self.onFrame?(slot, pb)
         }
         c.onFormats = { [weak self, weak mc] formats in
@@ -201,6 +239,9 @@ final class EpocCamBrowser {
 
     private func handleLive(_ mc: ManagedConn, resolved: NWEndpoint?) {
         mc.live = true
+        mc.everLive = true
+        mc.lastActivity = CFAbsoluteTimeGetCurrent()   // start the stall window from connect
+        primaryFailures[mc.serviceKey] = 0   // this dial worked; reset the fallback counter
         // Slot-key priority: the streamer's stable advertised id (survives IP/MAC changes)
         // → the peer MAC → the IP. The original iPhone has no id, so it uses MAC/IP.
         let key = mc.advertisedId.map { "id:\($0)" }
@@ -242,6 +283,13 @@ final class EpocCamBrowser {
     }
 
     private func handleDisconnect(_ mc: ManagedConn) {
+        guard !mc.dropped else { return }   // idempotent: watchdog + natural close can both fire
+        mc.dropped = true
+        // Never reached .ready — the dialled address is likely bad (e.g. a stale advertised
+        // IP after a roam). Count it so the next attempt falls back to hostname resolution.
+        if !mc.everLive {
+            primaryFailures[mc.serviceKey, default: 0] += 1
+        }
         let freed = mc.slot
         dropConnection(mc, notifySlot: true)
         if let slot = freed {
