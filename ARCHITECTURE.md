@@ -36,11 +36,21 @@ The streamer **re-advertises whenever its IP changes** (via `onLinkPropertiesCha
 
 **No slot-hogging (important for live use).** A phone that keeps failing to connect — e.g. a test device introduced during setup that then disconnects — is backed off with a growing delay (2 → 5 → 10 → 20 s). The pool skips backed-off services and tries fewest-failures-first, so a reachable phone always wins a free slot. The backoff resets the instant the phone re-advertises (a returning or roamed phone reconnects immediately).
 
+**ARP warm-up before dialing.** A phone that just joined Wi-Fi has no ARP entry on the Mac yet — mDNS discovery itself doesn't create one, since multicast replies don't require the Mac to ARP the sender. `NWConnection`'s TCP SYN to a cold ARP entry can stall for many seconds (well past the connect timeout below), even though a plain `ping`/`nc` to the same IP resolves ARP immediately and unblocks it. This is why "add a second phone while a first is already connected" used to work only after relaunching the viewer: the first phone's IP was ARP-warm from its own traffic, the second one's wasn't, and nothing on the Mac had ever talked to it. Every dial now fires a background `ping -c 1 -t 1 <ip>` in parallel (`Browser.swift`, `primeARP`) purely to force that ARP resolution; the dial itself never waits on it.
+
 ## Streamer: encoding reliability
 
 - **Automatic keyframes.** The encoder emits an IDR every ~1 second, so a viewer joins or recovers from loss within a second (rather than waiting on an on-demand keyframe request).
 - **Encoder self-heal.** If no keyframe flows for a few seconds while a viewer is connected, a watchdog recreates the MediaCodec on a background thread (single-flighted and rate-limited). This is the backstop for a *wedged* codec — one that keeps emitting P-frames but stops producing keyframes even when asked. Periodic keyframes alone can't fix that, because a stuck codec ignores keyframe requests.
 - **Note:** at HD, 1-second keyframes are large. If Wi-Fi contention causes hitching, widen the keyframe interval at HD.
+
+## Streamer: camera→encoder latency on Qualcomm devices (Pixel)
+
+Feeding the camera straight into `MediaCodec.createInputSurface()` is the documented, "recommended" zero-copy capture path, and it's what the encoder used originally. On Qualcomm-based phones (confirmed on a Pixel 5; Samsung's S6/S7, which this app is normally run on, are unaffected) that input surface's `HardwareBuffer` usage flag (`USAGE_VIDEO_ENCODE`) puts the driver into a mode that holds back ~500ms–1s of frames before the encoder ever sees them — independent of bitrate, profile, `KEY_LATENCY`, VBR vs CBR, or any other `MediaFormat`/`CaptureRequest` tuning. This is a known, Google-acknowledged platform issue closed **"Won't Fix (Obsolete)"** without a fix: https://issuetracker.google.com/issues/254027327.
+
+**Diagnosis approach that actually worked:** don't guess at encoder config — measure. Every encoded frame's `presentationTimeUs` is the camera's own capture timestamp, propagated untouched through the Surface into the encoder; diffing it against wall clock when the encoder emits that frame (`CameraEncoder.kt`'s `PIPE LATENCY` log, every ~2s) measures exactly how long a frame sat in the camera→encoder pipe, isolating that from anything downstream (network send, decode). Four different encoder/capture-request changes were tried and measured this way; none moved a suspiciously stable ~500ms figure at all — which is itself what pointed at a fixed driver-level pipeline depth rather than a tunable software parameter.
+
+**Fix:** route frames through `ImageReader` → `ImageWriter.queueInputImage()` instead of feeding the camera directly into the encoder's input surface. This sidesteps the `USAGE_VIDEO_ENCODE` flag while staying a zero-copy GPU buffer handoff (no CPU frame copy) — confirmed by the same bug report. Needs `ImageWriter.newInstance(surface, maxImages, format)` and `ImageReader.newInstance(..., usage)`, both API 29+, so it's gated behind `Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q`; below that, or if setup throws, it falls back to the original direct-Surface path unchanged. Measured result on the Pixel 5: ~500ms → ~90–100ms.
 
 ## Building
 
@@ -50,9 +60,11 @@ The streamer **re-advertises whenever its IP changes** (via `onLinkPropertiesCha
 ## Troubleshooting "a phone won't connect"
 
 1. **Same subnet?** mDNS is link-local. If the Mac and the phone end up on different subnets (e.g. the Mac loses one of two network interfaces), they can't discover each other even though both are "online". Check that the Mac has an address on the phone's subnet.
-2. **Reachable but not discovered** (ping / `nc <ip> 5054` succeed, but nothing shows up): a stale mDNS cache. Flush it with `sudo killall -HUP mDNSResponder`, and restart the viewer to clear any wedged in-memory pool state. (Rebooting the *phone* does not fix viewer-side state.)
-3. **Connects but no video:** the encoder is producing frames but no keyframes (wedged codec). Restart the streamer app; the self-heal watchdog also covers this.
-4. **High latency to a "local" IP** (e.g. hundreds of ms) usually means the phone is on the wrong Wi-Fi and being routed indirectly — put both devices on the same LAN.
+2. **Discovered but the connect just hangs** (`log stream --predicate 'process == "EpocCamViewer"'` shows `connecting to ...` then nothing — no `ready`, no `failed` — until the app's own connect timeout fires and it backs off): a cold ARP entry, most often the first time a *new* phone appears while another is already connected and ARP-warm. The viewer now primes ARP itself before every dial (see above), so this should self-heal; if it still happens, a manual `ping -c 3 <ip>` or `nc -zv <ip> 5054` from the Mac while it's stuck will unblock it immediately, which confirms the diagnosis.
+3. **Reachable but not discovered at all** (ping / `nc <ip> 5054` succeed, but nothing shows up in the browser): a stale mDNS cache. Flush it with `sudo killall -HUP mDNSResponder`, and restart the viewer to clear any wedged in-memory pool state. (Rebooting the *phone* does not fix viewer-side state.)
+4. **Connects but no video:** the encoder is producing frames but no keyframes (wedged codec). Restart the streamer app; the self-heal watchdog also covers this.
+5. **High latency to a "local" IP** (e.g. hundreds of ms) usually means the phone is on the wrong Wi-Fi and being routed indirectly — put both devices on the same LAN.
+6. **High latency on one specific phone, others fine** (e.g. steady ~1s only on some Android phones): check the phone's own on-screen camera preview first — if *that* already lags, the delay is upstream of the network entirely (camera/encoder pipeline on the phone, see "Streamer: camera→encoder latency on Qualcomm devices" above), not a receiver or Wi-Fi issue.
 
 ## Compatibility
 
