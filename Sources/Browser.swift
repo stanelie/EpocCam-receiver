@@ -238,6 +238,8 @@ final class EpocCamBrowser {
     }
 
     private func connect(service svcKey: NWEndpoint, to endpoint: NWEndpoint, advertisedId: String? = nil) {
+        primeARP(endpoint)
+
         let mc = ManagedConn(serviceKey: svcKey, endpoint: endpoint, advertisedId: advertisedId)
         conns.append(mc)
 
@@ -378,6 +380,20 @@ final class EpocCamBrowser {
     }
 
     // MARK: - MAC / IP identity
+
+    // Best-effort ARP warm-up. NWConnection's TCP SYN can stall for many seconds
+    // (well past our own 4s connect timeout) when the destination's ARP entry is
+    // cold — e.g. a phone that just joined Wi-Fi and no other traffic has reached
+    // it yet. A plain ping forces the kernel to resolve ARP immediately, so fire
+    // one in parallel with every dial. Runs off the browser queue so it never
+    // delays the connection attempt itself; the ping racing the SYN is enough —
+    // the dial itself doesn't wait on it.
+    private func primeARP(_ endpoint: NWEndpoint) {
+        guard case let .hostPort(host: .ipv4(addr), _) = endpoint else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            _ = self?.runTool("/sbin/ping", ["-c", "1", "-t", "1", "\(addr)"])
+        }
+    }
 
     // Best-effort stable identity for the peer we connected to.
     private func deviceKey(from endpoint: NWEndpoint?) -> String? {
