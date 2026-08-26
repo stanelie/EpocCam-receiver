@@ -34,6 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About EpocCam Viewer",
+                        action: #selector(showAbout(_:)),
+                        keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit EpocCam Viewer",
                         action: #selector(NSApplication.terminate(_:)),
                         keyEquivalent: "q")
@@ -67,6 +71,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         camMenuItem.submenu = camMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showAbout(_ sender: Any?) {
+        let credits = NSAttributedString(string:
+            "Dual-camera EpocCam receiver — discovers phones over mDNS and publishes\n" +
+            "each as a Syphon source (\"EpocCam A\" / \"EpocCam B\") for Millumin and others.\n\n" +
+            "github.com/stanelie/EpocCam-receiver")
+        NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 
     @objc private func swapCameras(_ sender: Any?) {
