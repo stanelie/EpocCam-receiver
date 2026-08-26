@@ -17,6 +17,8 @@ final class EpocCamBrowser {
     var onFormats: ((CameraSlot, [VideoFormat]) -> Void)?
     // Fired on the main thread with a human-readable status string.
     var onStatus:  ((CameraSlot, String) -> Void)?
+    // Fired on the main thread whenever a phone reports its battery: (level 0-100, charging).
+    var onBattery: ((CameraSlot, Int, Bool) -> Void)?
 
     // One managed connection = one phone. Its slot is decided once it's live.
     private final class ManagedConn {
@@ -253,6 +255,10 @@ final class EpocCamBrowser {
             guard let self, let mc, let slot = mc.slot else { return }
             self.onFormats?(slot, formats)
         }
+        c.onBattery = { [weak self, weak mc] level, charging in
+            guard let self, let mc, let slot = mc.slot else { return }
+            self.postBattery(slot, level, charging)
+        }
         c.onConnected = { [weak self, weak mc] resolved in
             guard let self, let mc else { return }
             self.handleLive(mc, resolved: resolved)
@@ -483,5 +489,9 @@ final class EpocCamBrowser {
 
     private func postStatus(_ slot: CameraSlot, _ msg: String) {
         DispatchQueue.main.async { [weak self] in self?.onStatus?(slot, msg) }
+    }
+
+    private func postBattery(_ slot: CameraSlot, _ level: Int, _ charging: Bool) {
+        DispatchQueue.main.async { [weak self] in self?.onBattery?(slot, level, charging) }
     }
 }

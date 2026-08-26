@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var videoViews:     [CameraSlot: VideoView]    = [:]
     private var statusLabels:   [CameraSlot: NSTextField]  = [:]
     private var statusOverlays: [CameraSlot: NSView]       = [:]
+    private var titleLabels:    [CameraSlot: NSTextField]  = [:]
     private var resolutionMenus:[CameraSlot: NSMenu]       = [:]
     private var activeFormatIndex: [CameraSlot: Int] = [:]
 
@@ -125,6 +126,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let content = window.contentView!
 
+        // Title row above the panes: one label per slot ("Camera A — 82%"), same column
+        // widths as the video stack below so each title sits above its own pane.
+        let titleRow = NSStackView()
+        titleRow.orientation = .horizontal
+        titleRow.distribution = .fillEqually
+        titleRow.spacing = 2
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(titleRow)
+
         // Side-by-side panes: Camera A on the left, Camera B on the right.
         let stack = NSStackView()
         stack.orientation = .horizontal
@@ -133,15 +143,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
         NSLayoutConstraint.activate([
+            titleRow.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            titleRow.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            titleRow.topAnchor.constraint(equalTo: content.topAnchor),
+            titleRow.heightAnchor.constraint(equalToConstant: 22),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.topAnchor.constraint(equalTo: titleRow.bottomAnchor),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
 
         for slot in CameraSlot.allCases {
+            titleRow.addArrangedSubview(makeTitleLabel(slot: slot))
             stack.addArrangedSubview(makePane(slot: slot))
         }
+    }
+
+    private func makeTitleLabel(slot: CameraSlot) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.black.cgColor
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: "Camera \(slot.label)")
+        label.textColor = .white
+        label.alignment = .center
+        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+
+        titleLabels[slot] = label
+        return container
     }
 
     // One pane = a VideoView plus a status pill shown until frames arrive.
@@ -228,10 +264,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.statusLabels[slot]?.stringValue = msg
             self.statusOverlays[slot]?.isHidden = false
-            // When a slot loses its feed, wipe the frozen last frame behind the overlay.
+            // When a slot loses its feed, wipe the frozen last frame behind the overlay, and
+            // drop the stale battery reading — it's a different phone by the time one reconnects.
             if msg.contains("Searching") || msg.contains("lost") {
                 self.videoViews[slot]?.clear()
+                self.titleLabels[slot]?.stringValue = "Camera \(slot.label)"
             }
+        }
+        browser.onBattery = { [weak self] slot, level, charging in
+            guard let self else { return }
+            let bolt = charging ? "⚡" : ""
+            self.titleLabels[slot]?.stringValue = "Camera \(slot.label) — \(bolt)\(level)%"
         }
         browser.onFrame = { [weak self] slot, pixelBuffer in
             guard let self else { return }

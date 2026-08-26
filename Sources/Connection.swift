@@ -10,6 +10,8 @@ final class EpocCamConnection {
     var onConnected:  ((NWEndpoint?) -> Void)?
     // Called once the capability packet is parsed; passes the available formats.
     var onFormats:    (([VideoFormat]) -> Void)?
+    // Called whenever a battery packet arrives: (level 0-100, charging).
+    var onBattery:    ((Int, Bool) -> Void)?
 
     private let conn:    NWConnection
     private let queue:   DispatchQueue
@@ -135,6 +137,13 @@ final class EpocCamConnection {
 
         case PktType.video.rawValue:
             decoder.handle(payload: payload, flags: header.flags)
+
+        case PktType.battery.rawValue:
+            guard payload.count >= 2 else { break }
+            let level = Int(payload[0])
+            let charging = payload[1] != 0
+            NSLog("EpocCam: battery packet: %d%% charging=%@", level, charging ? "true" : "false")
+            onBattery?(level, charging)
 
         default:
             NSLog("EpocCam: unknown packet type 0x%08X (%d bytes)", header.type, payload.count)

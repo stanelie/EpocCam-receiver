@@ -34,6 +34,7 @@ enum PktType: UInt32 {
     case fmtSelect  = 0x00020003
     case audio      = 0x00020004
     case capability = 0x00020005
+    case battery    = 0x00020006  // not in the original iPhone/Android wire protocol — our own
 }
 
 struct PktHeader {
