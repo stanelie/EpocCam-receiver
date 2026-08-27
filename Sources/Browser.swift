@@ -219,6 +219,10 @@ final class EpocCamBrowser {
             let useFallback = (primaryFailures[svcKey] ?? 0) > 0 && svc.resolve != svc.primary
             let dial = useFallback ? svc.resolve : svc.primary
             if useFallback { NSLog("EpocCam: advertised IP failing – dialling hostname %@", "\(svc.resolve)") }
+            // Prime the advertised IP, not whatever we're about to dial: the hostname
+            // fallback is a .service endpoint carrying no address to ping, and it's the
+            // path a struggling phone spends nearly all its retries on.
+            primeARP(svc.primary)
             connect(service: svcKey, to: dial, advertisedId: svc.id)
         }
     }
@@ -240,8 +244,6 @@ final class EpocCamBrowser {
     }
 
     private func connect(service svcKey: NWEndpoint, to endpoint: NWEndpoint, advertisedId: String? = nil) {
-        primeARP(endpoint)
-
         let mc = ManagedConn(serviceKey: svcKey, endpoint: endpoint, advertisedId: advertisedId)
         conns.append(mc)
 
@@ -394,10 +396,24 @@ final class EpocCamBrowser {
     // one in parallel with every dial. Runs off the browser queue so it never
     // delays the connection attempt itself; the ping racing the SYN is enough —
     // the dial itself doesn't wait on it.
+    //
+    // Always pass the phone's *advertised IP*, never the endpoint being dialled:
+    // the hostname-fallback endpoint is a `.service(...)` with no address to ping,
+    // so priming the dial target left every fallback attempt unprimed — and once
+    // the first attempt fails the pool dials the hostname from then on, which is
+    // where a struggling phone spends nearly all its retries.
     private func primeARP(_ endpoint: NWEndpoint) {
-        guard case let .hostPort(host: .ipv4(addr), _) = endpoint else { return }
+        guard case let .hostPort(host: .ipv4(addr), _) = endpoint else {
+            NSLog("EpocCam: ARP prime skipped – no advertised IP for %@", "\(endpoint)")
+            return
+        }
+        NSLog("EpocCam: priming ARP for %@", "\(addr)")
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            _ = self?.runTool("/sbin/ping", ["-c", "1", "-t", "1", "\(addr)"])
+            // A single 1s ping isn't enough to wake a Wi-Fi radio in power save —
+            // a cold Galaxy S7 answered at ~60ms/packet only after several packets,
+            // while a warm one replies in ~3ms. Short but persistent; nothing waits
+            // on it. (-i below 1s needs root, so the default interval stands.)
+            _ = self?.runTool("/sbin/ping", ["-c", "3", "-t", "3", "\(addr)"])
         }
     }
 
