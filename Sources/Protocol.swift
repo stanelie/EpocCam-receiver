@@ -15,9 +15,9 @@ enum CameraSlot: Int, CaseIterable {
     var label: String { self == .a ? "A" : "B" }
     var syphonName: String { "EpocCam \(label)" }
 
-    // Per-slot UserDefaults keys (last-known host/port for fast reconnect, last format).
-    var lastHostKey:   String { "EpocCamLastHost.\(label)" }
-    var lastPortKey:   String { "EpocCamLastPort.\(label)" }
+    // Per-slot UserDefaults key for the last selected format. (lastHostKey/lastPortKey
+    // used to live here too, for the "last-known host" fast-start probe that was removed
+    // — it raced mDNS and opened a second socket to the same phone. Nothing read them.)
     var lastFormatKey: String { "EpocCamLastFormat.\(label)" }
 
     static func from(role: String?) -> CameraSlot? {
