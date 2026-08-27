@@ -389,13 +389,18 @@ final class EpocCamBrowser {
 
     // MARK: - MAC / IP identity
 
-    // Best-effort ARP warm-up. NWConnection's TCP SYN can stall for many seconds
-    // (well past our own 4s connect timeout) when the destination's ARP entry is
-    // cold — e.g. a phone that just joined Wi-Fi and no other traffic has reached
-    // it yet. A plain ping forces the kernel to resolve ARP immediately, so fire
-    // one in parallel with every dial. Runs off the browser queue so it never
-    // delays the connection attempt itself; the ping racing the SYN is enough —
-    // the dial itself doesn't wait on it.
+    // Best-effort ARP warm-up — now a *backstop*, not the primary fix.
+    //
+    // The real cause of cold-ARP stalls was on the phone: Android's Wi-Fi driver
+    // filters inbound broadcast frames (which ARP requests are) unless the app holds
+    // a MulticastLock, so a fully-awake phone simply never answered the Mac's ARP
+    // request. Our streamer now holds that lock, and a cold-cache connect measures
+    // ~42ms with this priming disabled entirely — versus ~1.06s with priming but no
+    // lock, and minutes of 4s timeouts with neither.
+    //
+    // Kept anyway for peers we don't control: the original iPhone EpocCam
+    // transmitter holds no such lock, and OEM Wi-Fi stacks vary. It costs one short
+    // ping per dial attempt and the dial never waits on it.
     //
     // Always pass the phone's *advertised IP*, never the endpoint being dialled:
     // the hostname-fallback endpoint is a `.service(...)` with no address to ping,
