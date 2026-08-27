@@ -55,24 +55,25 @@ final class EpocCamBrowser {
     // service endpoint -> consecutive failures connecting without ever going live.
     // Once >0 we try `resolve` (hostname) instead, so a stale advertised IP self-heals.
     private var primaryFailures: [NWEndpoint: Int] = [:]
-    // service endpoint -> earliest time to retry it. A service that keeps failing is backed
-    // off so a departed/unreachable phone can never hog a pool slot from a reachable one.
-    private var nextAttemptAt: [NWEndpoint: CFAbsoluteTime] = [:]
-
-    private func backoffDelay(failures: Int) -> Double {
-        switch failures {
-        case ..<1: return 0
-        case 1:    return 2
-        case 2:    return 5
-        case 3:    return 10
-        default:   return 20
-        }
-    }
+    // No retry backoff: on a dedicated AP with a handful of known phones, a fast
+    // reconnect matters far more than being polite to an absent one. A phone that keeps
+    // failing is deprioritised by *ordering* (fewest failures first) rather than delayed,
+    // so it can never starve a reachable phone yet is still retried every cycle.
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "epoccam.browser", qos: .userInitiated)
     private var pendingWork: [DispatchWorkItem] = []
 
     private static let kSlotMapKey = "EpocCamSlotMap"       // deviceKey -> slot rawValue
+
+    // How often the watchdog re-dials and re-checks discovery.
+    private static let kRetryInterval = 1.0
+    // While a slot is empty, tear down and restart the browser this often. NWBrowser has
+    // no "query now" API, and a long-running browser falls back on the phone's unsolicited
+    // announcements plus its own exponentially-backed-off re-queries — which is how a phone
+    // that appears later can go unnoticed for ~30s. Restarting forces a fresh active query,
+    // so discovery works from nothing and stays fast without depending on prior state.
+    private static let kBrowserRefresh = 5.0
+    private var lastBrowserStart: CFAbsoluteTime = 0
 
     func start() {
         startBrowser()
@@ -85,7 +86,7 @@ final class EpocCamBrowser {
     // advertised address).
     private static let kStallTimeout = 6.0
     private func scheduleWatchdog() {
-        queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+        queue.asyncAfter(deadline: .now() + Self.kRetryInterval) { [weak self] in
             guard let self else { return }
             let now = CFAbsoluteTimeGetCurrent()
             for mc in self.conns where mc.everLive && !mc.dropped {
@@ -96,7 +97,13 @@ final class EpocCamBrowser {
                     self.handleDisconnect(mc)
                 }
             }
-            // Fill a free slot / retry a service whose backoff has expired.
+            // Force a fresh mDNS query while any slot is unfilled, so a phone powered on
+            // after the viewer is found in seconds rather than whenever the browser next
+            // happens to re-query.
+            if self.conns.filter({ $0.live }).count < CameraSlot.allCases.count,
+               now - self.lastBrowserStart > Self.kBrowserRefresh {
+                self.restartBrowser()
+            }
             self.connectMoreIfPossible()
             self.scheduleWatchdog()
         }
@@ -152,7 +159,14 @@ final class EpocCamBrowser {
 
     // MARK: - Discovery
 
+    private func restartBrowser() {
+        browser?.cancel()
+        browser = nil
+        startBrowser()
+    }
+
     private func startBrowser() {
+        lastBrowserStart = CFAbsoluteTimeGetCurrent()
         // bonjourWithTXTRecord so we can read the streamer's advertised "ip".
         let desc   = NWBrowser.Descriptor.bonjourWithTXTRecord(type: kService, domain: "local.")
         let params = NWParameters.tcp
@@ -169,8 +183,7 @@ final class EpocCamBrowser {
                 case .removed(let result):
                     self.discovered.removeValue(forKey: result.endpoint)
                     self.primaryFailures.removeValue(forKey: result.endpoint)
-                    self.nextAttemptAt.removeValue(forKey: result.endpoint)
-                default:
+                        default:
                     break
                 }
             }
@@ -196,22 +209,19 @@ final class EpocCamBrowser {
     }
 
     // A discovered service: freshly advertised (new phone, or a roamed phone re-announcing
-    // its new IP), so clear any backoff and retry it immediately.
+    // its new IP), so clear its failure count and retry it immediately.
     private func onDiscovered(_ result: NWBrowser.Result) {
         discovered[result.endpoint] = service(for: result)
         primaryFailures[result.endpoint] = 0
-        nextAttemptAt.removeValue(forKey: result.endpoint)
         connectMoreIfPossible()
     }
 
-    // Dial discovered services we're not already talking to, up to two connections. Skips
-    // services in backoff (so a departed/failing phone can't hold a slot from a reachable
-    // one), and tries fewest-failures-first. If a service's advertised IP has been failing,
-    // dial the mDNS hostname instead (self-heals a stale IP).
+    // Dial every discovered service we're not already talking to, up to two connections,
+    // fewest-failures-first so a reachable phone is always tried before a failing one.
+    // If a service's advertised IP has been failing, dial the mDNS hostname instead
+    // (self-heals a stale IP).
     private func connectMoreIfPossible() {
-        let now = CFAbsoluteTimeGetCurrent()
         let candidates = discovered
-            .filter { now >= (nextAttemptAt[$0.key] ?? 0) }
             .sorted { (primaryFailures[$0.key] ?? 0) < (primaryFailures[$1.key] ?? 0) }
         for (svcKey, svc) in candidates {
             guard conns.count < 2 else { break }
@@ -281,7 +291,6 @@ final class EpocCamBrowser {
         mc.everLive = true
         mc.lastActivity = CFAbsoluteTimeGetCurrent()   // start the stall window from connect
         primaryFailures[mc.serviceKey] = 0   // this dial worked; reset the fallback counter
-        nextAttemptAt.removeValue(forKey: mc.serviceKey)
         // Slot-key priority: the streamer's stable advertised id (survives IP/MAC changes)
         // → the peer MAC → the IP. The original iPhone has no id, so it uses MAC/IP.
         let key = mc.advertisedId.map { "id:\($0)" }
@@ -326,14 +335,13 @@ final class EpocCamBrowser {
         guard !mc.dropped else { return }   // idempotent: watchdog + natural close can both fire
         mc.dropped = true
         // Never reached .ready — the dialled address is likely bad (e.g. a stale advertised
-        // IP after a roam, or a departed phone). Count it (so the next attempt falls back to
-        // the hostname) and back it off so it yields the slot to any reachable phone.
+        // IP after a roam, or a departed phone). Count it, which both switches the next
+        // attempt to the hostname and sorts this service behind reachable ones. It is still
+        // retried on the very next cycle.
         if !mc.everLive {
             let n = (primaryFailures[mc.serviceKey] ?? 0) + 1
             primaryFailures[mc.serviceKey] = n
-            nextAttemptAt[mc.serviceKey] = CFAbsoluteTimeGetCurrent() + backoffDelay(failures: n)
-            NSLog("EpocCam: connect to %@ failed (x%d) – backing off %.0fs",
-                  mc.endpoint.debugDescription, n, backoffDelay(failures: n))
+            NSLog("EpocCam: connect to %@ failed (x%d) – will retry", mc.endpoint.debugDescription, n)
         }
         let freed = mc.slot
         dropConnection(mc, notifySlot: true)
@@ -341,7 +349,7 @@ final class EpocCamBrowser {
             NSLog("EpocCam[%@] disconnected – will reconnect", slot.label)
         }
         // Reconnect the same phone (still discovered) or pick up a waiting one.
-        scheduleReconnect(delay: 1.0)
+        scheduleReconnect(delay: 0.2)
     }
 
     private func dropConnection(_ mc: ManagedConn, notifySlot: Bool) {
