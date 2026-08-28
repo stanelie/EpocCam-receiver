@@ -22,7 +22,14 @@ Two problems had to be solved before two phones could be told apart:
 - a TXT record **`id`** — the viewer's stable slot key (survives IP changes, MAC randomization, and reboots);
 - a TXT record **`ip`** — the phone's current IPv4, so the viewer dials the exact phone and sidesteps the shared `Android.local` hostname.
 
-The streamer **re-advertises whenever its IP changes** (via `onLinkPropertiesChanged`, which — unlike `onAvailable` — fires on a same-network Wi-Fi roam), through a single **debounced re-registration** (this also replaced a per-disconnect mDNS "bounce" that was thrashing Android's NSD).
+The streamer **re-advertises whenever its IP changes** (via `onLinkPropertiesChanged`, which — unlike `onAvailable` — fires on a same-network Wi-Fi roam), through a single **debounced re-registration** (this also replaced a per-disconnect mDNS "bounce" that was thrashing the responder).
+
+**The streamer serves mDNS with JmDNS, not `android.net.nsd.NsdManager`.** The system daemon was measured registering this same service in **2 s, 73 s and 109 s** on one phone with identical code — and while it is unregistered, the phone is simply undiscoverable, so the app looks broken. It also cannot be safely forced, which is worth recording because both workarounds are tempting and both are wrong:
+
+- *Retrying on a timer keyed to `onServiceRegistered`* fails, because that callback does not reliably fire even when the record demonstrably **is** on the wire (confirmed with `dns-sd -B` while the callback had never arrived). The retry then tears down a perfectly good advertisement.
+- *Rapid re-registration wedges the daemon outright.* Roughly 29 register/unregister cycles left the phone advertising nothing at all until Wi-Fi was toggled to restart `mdnsd`.
+
+JmDNS runs in-process, so registration is observable and controllable. It must be given the interface address explicitly (`JmDNS.create(InetAddress, name)`) — letting it choose can bind it to a virtual or secondary interface the viewer isn't on — and all of `create` / `registerService` / `close` block on network I/O, so they run on a dedicated single thread. It also **requires the `MulticastLock`** already held for the ARP fix above. Measured after the switch: **~0.4 s to register, across six consecutive rapid restarts** (386–414 ms), the exact pattern that produced the 73 s and 109 s cases.
 
 ## Viewer: identity, connection pool, resilience
 
