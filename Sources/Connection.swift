@@ -159,6 +159,16 @@ final class EpocCamConnection {
         sendFormatSelect(index: index)
     }
 
+    // Toggle the phone's camera LED. Fire-and-forget: the phone doesn't acknowledge, so
+    // the viewer's button reflects what was *requested*, not confirmed hardware state.
+    func setTorch(on: Bool) {
+        guard live else { return }
+        conn.send(content: Data.torchPacket(on: on), completion: .contentProcessed { err in
+            if let err { NSLog("EpocCam: torch send error: %@", err.localizedDescription) }
+            else { NSLog("EpocCam: torch %@ sent", on ? "ON" : "OFF") }
+        })
+    }
+
     private func sendFormatSelect(index: Int) {
         let pkt = Data.formatSelectPacket(index: UInt16(index))
         conn.send(content: pkt, completion: .contentProcessed { err in

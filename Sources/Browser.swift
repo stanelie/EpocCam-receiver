@@ -129,6 +129,14 @@ final class EpocCamBrowser {
         }
     }
 
+    // Operator control: toggle the camera LED on whichever phone holds this slot.
+    func setTorch(slot: CameraSlot, on: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.conns.first { $0.slot == slot && $0.live }?.conn?.setTorch(on: on)
+        }
+    }
+
     // Operator control: swap the two live feeds' slots (or move the single one to the
     // other slot). Persists so the choice sticks across restarts.
     func swapSlots() {

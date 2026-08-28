@@ -35,6 +35,7 @@ enum PktType: UInt32 {
     case audio      = 0x00020004
     case capability = 0x00020005
     case battery    = 0x00020006  // not in the original iPhone/Android wire protocol — our own
+    case torch      = 0x00020007  // ditto: viewer -> phone, toggles the camera LED
 }
 
 struct PktHeader {
@@ -118,6 +119,19 @@ extension Data {
         self[b+1] = UInt8((v >> 8) & 0xFF)
         self[b+2] = UInt8((v >> 16) & 0xFF)
         self[b+3] = UInt8((v >> 24) & 0xFF)
+    }
+
+    // Build a torch (camera LED) packet, viewer → streamer. Same 256-byte shape as
+    // format-select because the phone's receive path assumes one packet per read and
+    // pulls its fields from fixed offsets; matching that layout keeps it safe.
+    static func torchPacket(on: Bool) -> Data {
+        var p = Data(count: 256)
+        p.putLeU32(kMagic,                  at: 0)
+        p.putLeU32(0,                       at: 4)
+        p.putLeU32(PktType.torch.rawValue,  at: 8)
+        p.putLeU32(UInt32(244),             at: 12)  // remaining bytes
+        p[16] = on ? 1 : 0
+        return p
     }
 
     // Build a format-select packet (viewer → streamer)

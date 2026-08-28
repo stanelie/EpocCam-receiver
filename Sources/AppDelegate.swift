@@ -12,7 +12,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusLabels:   [CameraSlot: NSTextField]  = [:]
     private var statusOverlays: [CameraSlot: NSView]       = [:]
     private var titleLabels:    [CameraSlot: NSTextField]  = [:]
+    private var lightButtons:   [CameraSlot: NSButton]     = [:]
+    // What we last *asked* each phone to do. The phone doesn't acknowledge, so this tracks
+    // the request, not confirmed hardware state.
+    private var torchOn:        [CameraSlot: Bool]         = [:]
     private var resolutionMenus:[CameraSlot: NSMenu]       = [:]
+    private var alwaysOnTopItem: NSMenuItem?
+    private static let kAlwaysOnTopKey = "EpocCamAlwaysOnTop"
     private var activeFormatIndex: [CameraSlot: Int] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -21,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         buildMenu()
         buildWindow()
+        setAlwaysOnTop(UserDefaults.standard.bool(forKey: Self.kAlwaysOnTopKey))
         startPipeline()
     }
 
@@ -71,6 +78,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         keyEquivalent: "s")
         camMenuItem.submenu = camMenu
 
+        // Window menu — keep the viewer above Millumin while operating it.
+        let winMenuItem = NSMenuItem()
+        winMenuItem.title = "Window"
+        mainMenu.addItem(winMenuItem)
+        let winMenu = NSMenu(title: "Window")
+        let onTop = NSMenuItem(title: "Always on Top",
+                               action: #selector(toggleAlwaysOnTop(_:)),
+                               keyEquivalent: "t")
+        winMenu.addItem(onTop)
+        winMenuItem.submenu = winMenu
+        alwaysOnTopItem = onTop
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -80,6 +99,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "each as a Syphon source (\"EpocCam A\" / \"EpocCam B\") for Millumin and others.\n\n" +
             "github.com/stanelie/EpocCam-receiver")
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    }
+
+    @objc private func toggleAlwaysOnTop(_ sender: Any?) {
+        setAlwaysOnTop(!UserDefaults.standard.bool(forKey: Self.kAlwaysOnTopKey))
+    }
+
+    // Persisted: an operator who wants the viewer pinned over Millumin wants it pinned
+    // again next launch, not to rediscover the menu item every show.
+    private func setAlwaysOnTop(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.kAlwaysOnTopKey)
+        window?.level = on ? .floating : .normal
+        alwaysOnTopItem?.state = on ? .on : .off
+        NSLog("EpocCam: always on top %@", on ? "ON" : "OFF")
+    }
+
+    @objc private func toggleLight(_ sender: NSButton) {
+        guard let slot = CameraSlot(rawValue: sender.tag) else { return }
+        let on = !(torchOn[slot] ?? false)
+        torchOn[slot] = on
+        applyLightAppearance(slot)
+        browser.setTorch(slot: slot, on: on)
+        NSLog("EpocCam[%@]: torch %@ requested", slot.label, on ? "ON" : "OFF")
+    }
+
+    private func applyLightAppearance(_ slot: CameraSlot) {
+        guard let b = lightButtons[slot] else { return }
+        let on = torchOn[slot] ?? false
+        b.layer?.backgroundColor = on ? NSColor.systemYellow.withAlphaComponent(0.85).cgColor
+                                      : NSColor.black.withAlphaComponent(0.45).cgColor
+        b.alphaValue = on ? 1.0 : 0.65
     }
 
     @objc private func swapCameras(_ sender: Any?) {
@@ -146,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             titleRow.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             titleRow.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             titleRow.topAnchor.constraint(equalTo: content.topAnchor),
-            titleRow.heightAnchor.constraint(equalToConstant: 22),
+            titleRow.heightAnchor.constraint(equalToConstant: 30),
             stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             stack.topAnchor.constraint(equalTo: titleRow.bottomAnchor),
@@ -157,6 +206,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             titleRow.addArrangedSubview(makeTitleLabel(slot: slot))
             stack.addArrangedSubview(makePane(slot: slot))
         }
+
+        // Swap button sits across the two title cells rather than inside either one — it acts
+        // on both. Added to `content` (not titleRow) so it can straddle the pane boundary; the
+        // per-slot labels are centred within their own halves, so they don't collide with it.
+        let swap = NSButton(title: "Swap A ↔ B", target: self, action: #selector(swapCameras(_:)))
+        swap.bezelStyle = .rounded
+        swap.controlSize = .small
+        swap.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        swap.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(swap)
+        NSLayoutConstraint.activate([
+            swap.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            swap.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
+        ])
     }
 
     private func makeTitleLabel(slot: CameraSlot) -> NSView {
@@ -220,9 +283,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             label.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -10),
         ])
 
+        // Camera LED toggle. Deliberately an AppKit view layered over the VideoView, never
+        // composited into the CVPixelBuffer — Syphon publishes that buffer straight from the
+        // decoder, so overlays are excluded from the Syphon output by construction.
+        // Outer corners: A (left pane) top-left, B (right pane) top-right.
+        let light = NSButton(title: "💡", target: self, action: #selector(toggleLight(_:)))
+        light.tag = slot.rawValue
+        light.isBordered = false
+        light.font = NSFont.systemFont(ofSize: 20)
+        light.wantsLayer = true
+        light.layer?.cornerRadius = 6
+        light.translatesAutoresizingMaskIntoConstraints = false
+        pane.addSubview(light)
+        NSLayoutConstraint.activate([
+            light.topAnchor.constraint(equalTo: pane.topAnchor, constant: 8),
+            light.widthAnchor.constraint(equalToConstant: 36),
+            light.heightAnchor.constraint(equalToConstant: 30),
+            slot == .a
+                ? light.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8)
+                : light.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
+        ])
+
         videoViews[slot]     = videoView
         statusLabels[slot]   = label
         statusOverlays[slot] = pill
+        lightButtons[slot]   = light
+        torchOn[slot]        = false
+        applyLightAppearance(slot)
         return pane
     }
 
@@ -269,6 +356,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if msg.contains("Searching") || msg.contains("lost") {
                 self.videoViews[slot]?.clear()
                 self.titleLabels[slot]?.stringValue = "Camera \(slot.label)"
+                self.torchOn[slot] = false
+                self.applyLightAppearance(slot)
             }
         }
         browser.onBattery = { [weak self] slot, level, charging in
