@@ -211,14 +211,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // on both. Added to `content` (not titleRow) so it can straddle the pane boundary; the
         // per-slot labels are centred within their own halves, so they don't collide with it.
         let swap = NSButton(title: "Swap A ↔ B", target: self, action: #selector(swapCameras(_:)))
-        swap.bezelStyle = .rounded
-        swap.controlSize = .small
+        // Borderless over its own layer rather than a stock bezel: .rounded has a fixed
+        // intrinsic height and simply ignores a height constraint, so it can't be made to
+        // match the title bar.
+        swap.isBordered = false
+        swap.wantsLayer = true
+        swap.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        swap.contentTintColor = .white
         swap.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         swap.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(swap)
         NSLayoutConstraint.activate([
             swap.centerXAnchor.constraint(equalTo: content.centerXAnchor),
             swap.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
+            swap.heightAnchor.constraint(equalTo: titleRow.heightAnchor),
+            swap.widthAnchor.constraint(equalToConstant: 110),
         ])
     }
 
@@ -286,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Camera LED toggle. Deliberately an AppKit view layered over the VideoView, never
         // composited into the CVPixelBuffer — Syphon publishes that buffer straight from the
         // decoder, so overlays are excluded from the Syphon output by construction.
-        // Outer corners: A (left pane) top-left, B (right pane) top-right.
+        // Top-right of each pane.
         let light = NSButton(title: "💡", target: self, action: #selector(toggleLight(_:)))
         light.tag = slot.rawValue
         light.isBordered = false
@@ -299,9 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             light.topAnchor.constraint(equalTo: pane.topAnchor, constant: 8),
             light.widthAnchor.constraint(equalToConstant: 36),
             light.heightAnchor.constraint(equalToConstant: 30),
-            slot == .a
-                ? light.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8)
-                : light.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
+            light.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
         ])
 
         videoViews[slot]     = videoView
