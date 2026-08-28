@@ -8,6 +8,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Per-slot UI + output. Each slot owns its own Syphon server so Millumin sees
     // two distinct sources ("EpocCam A" and "EpocCam B").
     private var syphon:         [CameraSlot: SyphonBridge] = [:]
+    // Optional NDI output for consumers that can't speak Syphon. Off by default: unlike
+    // Syphon's zero-copy IOSurface handoff, NDI re-encodes every frame, so it costs real
+    // CPU and latency even when the consumer is on this same machine.
+    private var ndi:            [CameraSlot: NDIBridge]    = [:]
+    private var ndiItem: NSMenuItem?
+    private static let kNDIKey = "EpocCamNDIOutput"
     private var videoViews:     [CameraSlot: VideoView]    = [:]
     private var statusLabels:   [CameraSlot: NSTextField]  = [:]
     private var statusOverlays: [CameraSlot: NSView]       = [:]
@@ -26,16 +32,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var activeFormatIndex: [CameraSlot: Int] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard claimSingleInstance() else { return }
         for slot in CameraSlot.allCases {
             activeFormatIndex[slot] = UserDefaults.standard.integer(forKey: slot.lastFormatKey)
         }
         buildMenu()
         buildWindow()
         setAlwaysOnTop(UserDefaults.standard.bool(forKey: Self.kAlwaysOnTopKey))
+        setNDI(UserDefaults.standard.bool(forKey: Self.kNDIKey))
         startPipeline()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    // Two viewers on one machine actively break things rather than merely duplicating work:
+    // each streamer serves a single viewer socket, so the second instance fights the first
+    // for the phones, and both would publish Syphon servers *and* NDI sources under the same
+    // names. Hand focus to the instance already running and bow out.
+    private func claimSingleInstance() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return true }
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != mine }
+        guard let existing = others.first else { return true }
+        NSLog("EpocCam: another viewer is already running (pid %d) — activating it and exiting",
+              existing.processIdentifier)
+        existing.activate(options: [.activateIgnoringOtherApps])
+        NSApp.terminate(nil)
+        return false
+    }
 
     // MARK: - Menu
 
@@ -94,6 +119,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         winMenuItem.submenu = winMenu
         alwaysOnTopItem = onTop
 
+        // Output menu — NDI is a test/opt-in path alongside Syphon, never a replacement.
+        let outMenuItem = NSMenuItem()
+        outMenuItem.title = "Output"
+        mainMenu.addItem(outMenuItem)
+        let outMenu = NSMenu(title: "Output")
+        let ndiToggle = NSMenuItem(title: "NDI Output",
+                                   action: #selector(toggleNDI(_:)),
+                                   keyEquivalent: "n")
+        outMenu.addItem(ndiToggle)
+        outMenu.addItem(NSMenuItem.separator())
+        let note = NSMenuItem(title: "Syphon is always on (\"EpocCam A\" / \"EpocCam B\")",
+                              action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        outMenu.addItem(note)
+        outMenuItem.submenu = outMenu
+        ndiItem = ndiToggle
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -103,6 +145,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "each as a Syphon source (\"EpocCam A\" / \"EpocCam B\") for Millumin and others.\n\n" +
             "github.com/stanelie/EpocCam-receiver")
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
+    }
+
+    @objc private func toggleNDI(_ sender: Any?) {
+        setNDI(!UserDefaults.standard.bool(forKey: Self.kNDIKey))
+    }
+
+    private func setNDI(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.kNDIKey)
+        ndiItem?.state = on ? .on : .off
+        if on {
+            for slot in CameraSlot.allCases where ndi[slot] == nil {
+                if let b = NDIBridge(name: slot.syphonName) {
+                    ndi[slot] = b
+                } else {
+                    NSLog("EpocCam[%@]: NDI sender could not be created", slot.label)
+                }
+            }
+        } else {
+            ndi.values.forEach { $0.stop() }
+            ndi.removeAll()
+        }
+        NSLog("EpocCam: NDI output %@", on ? "ON" : "OFF")
     }
 
     @objc private func toggleAlwaysOnTop(_ sender: Any?) {
@@ -464,6 +528,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.videoViews[slot]?.display(pixelBuffer: pixelBuffer)
             self.syphon[slot]?.publishPixelBuffer(pixelBuffer)
+            self.ndi[slot]?.send(pixelBuffer)
         }
         browser.start()
     }

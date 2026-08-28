@@ -13,6 +13,17 @@ echo "==> Cleaning build dir"
 rm -rf "$BUILD"
 mkdir -p "$MACOS" "$FW" "$RES"
 
+NDI_SDK="/Library/NDI SDK for Apple"
+if [ ! -f "$NDI_SDK/lib/macOS/libndi.dylib" ]; then
+  echo "!! NDI SDK not found at $NDI_SDK — install it from ndi.video" >&2
+  exit 1
+fi
+
+echo "==> Copying libndi.dylib"
+cp "$NDI_SDK/lib/macOS/libndi.dylib" "$FW/"
+# Its install name is already @rpath/libndi.dylib, and the binary below is linked with
+# an @executable_path/../Frameworks rpath, so no install_name_tool fixup is needed.
+
 echo "==> Copying Syphon.framework"
 cp -R "$PROJ/Frameworks/Syphon.framework" "$FW/"
 install_name_tool -id \
@@ -34,6 +45,18 @@ for ARCH in arm64 x86_64; do
     -I"$PROJ/Sources" \
     -c "$PROJ/Sources/SyphonBridge.m" \
     -o "$OBJDIR/$ARCH/SyphonBridge.o"
+
+  clang \
+    -arch $ARCH \
+    -isysroot "$SDK" \
+    -mmacosx-version-min=$MIN \
+    -fobjc-arc \
+    -fmodules \
+    -F"$PROJ/Frameworks" \
+    -I"$PROJ/Sources" \
+    -I"$NDI_SDK/include" \
+    -c "$PROJ/Sources/NDIBridge.m" \
+    -o "$OBJDIR/$ARCH/NDIBridge.o"
 done
 
 echo "==> Compiling Swift sources (arm64 + x86_64)"
@@ -56,6 +79,8 @@ for ARCH in arm64 x86_64; do
     -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
     "${SWIFT_SRCS[@]}" \
     "$OBJDIR/$ARCH/SyphonBridge.o" \
+    "$OBJDIR/$ARCH/NDIBridge.o" \
+    "$NDI_SDK/lib/macOS/libndi.dylib" \
     -framework Cocoa \
     -framework AVFoundation \
     -framework CoreVideo \
