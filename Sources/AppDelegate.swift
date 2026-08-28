@@ -12,6 +12,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Syphon's zero-copy IOSurface handoff, NDI re-encodes every frame, so it costs real
     // CPU and latency even when the consumer is on this same machine.
     private var ndi:            [CameraSlot: NDIBridge]    = [:]
+    // NDI runs on its own queue per slot so it can never hold up Syphon or the preview,
+    // which are the primary path. The semaphore keeps at most one frame in flight: if NDI
+    // is still busy the frame is dropped rather than queued, so a slow encode can't build
+    // an unbounded backlog of stale frames (which would add latency as well as memory).
+    private var ndiQueues:      [CameraSlot: DispatchQueue]     = [:]
+    private var ndiGate:        [CameraSlot: DispatchSemaphore] = [:]
+    private var ndiDropped:     [CameraSlot: Int]               = [:]
+    // The sinks are created/torn down on the main thread but read on the frame thread.
+    private let ndiLock = NSLock()
     private var ndiItem: NSMenuItem?
     private static let kNDIKey = "EpocCamNDIOutput"
     private var videoViews:     [CameraSlot: VideoView]    = [:]
@@ -155,18 +164,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(on, forKey: Self.kNDIKey)
         ndiItem?.state = on ? .on : .off
         if on {
-            for slot in CameraSlot.allCases where ndi[slot] == nil {
-                if let b = NDIBridge(name: slot.syphonName) {
-                    ndi[slot] = b
-                } else {
+            for slot in CameraSlot.allCases where ndiSink(slot) == nil {
+                guard let b = NDIBridge(name: slot.syphonName) else {
                     NSLog("EpocCam[%@]: NDI sender could not be created", slot.label)
+                    continue
                 }
+                ndiQueues[slot] = DispatchQueue(label: "epoccam.ndi.\(slot.label)", qos: .userInitiated)
+                ndiGate[slot]   = DispatchSemaphore(value: 1)
+                ndiDropped[slot] = 0
+                ndiLock.lock(); ndi[slot] = b; ndiLock.unlock()
             }
         } else {
-            ndi.values.forEach { $0.stop() }
+            ndiLock.lock()
+            let sinks = ndi
             ndi.removeAll()
+            ndiLock.unlock()
+            // Tear down on each slot's own queue so we can't destroy a sender while its
+            // async send is still in flight.
+            for (slot, sink) in sinks {
+                (ndiQueues[slot] ?? DispatchQueue.global()).async { sink.stop() }
+            }
+            ndiQueues.removeAll(); ndiGate.removeAll(); ndiDropped.removeAll()
         }
         NSLog("EpocCam: NDI output %@", on ? "ON" : "OFF")
+    }
+
+    private func ndiSink(_ slot: CameraSlot) -> NDIBridge? {
+        ndiLock.lock(); defer { ndiLock.unlock() }
+        return ndi[slot]
+    }
+
+    // Hand the frame to NDI without ever blocking the caller. Returns immediately if the
+    // previous frame is still encoding — dropping the older frame is both cheaper and
+    // *lower* latency than working through a backlog.
+    private func publishNDI(_ slot: CameraSlot, _ pixelBuffer: CVPixelBuffer) {
+        guard let sink = ndiSink(slot),
+              let queue = ndiQueues[slot],
+              let gate = ndiGate[slot] else { return }
+        guard gate.wait(timeout: .now()) == .success else {
+            let n = (ndiDropped[slot] ?? 0) + 1
+            ndiDropped[slot] = n
+            if n % 30 == 0 { NSLog("EpocCam[%@]: NDI behind — %d frames dropped", slot.label, n) }
+            return
+        }
+        queue.async {
+            sink.send(pixelBuffer)
+            gate.signal()
+        }
     }
 
     @objc private func toggleAlwaysOnTop(_ sender: Any?) {
@@ -528,7 +572,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.videoViews[slot]?.display(pixelBuffer: pixelBuffer)
             self.syphon[slot]?.publishPixelBuffer(pixelBuffer)
-            self.ndi[slot]?.send(pixelBuffer)
+            // Last, and off-thread: Syphon and the preview never wait on NDI.
+            self.publishNDI(slot, pixelBuffer)
         }
         browser.start()
     }
