@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusOverlays: [CameraSlot: NSView]       = [:]
     private var titleLabels:    [CameraSlot: NSTextField]  = [:]
     private var lightButtons:   [CameraSlot: NSButton]     = [:]
+    private var focusButtons:   [CameraSlot: NSButton]     = [:]
+    private var refocusButtons: [CameraSlot: NSButton]     = [:]
+    // Reported by the phone, never inferred here — the button mirrors the phone.
+    private var focusStates:    [CameraSlot: FocusState]   = [:]
     // What we last *asked* each phone to do. The phone doesn't acknowledge, so this tracks
     // the request, not confirmed hardware state.
     private var torchOn:        [CameraSlot: Bool]         = [:]
@@ -112,6 +116,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window?.level = on ? .floating : .normal
         alwaysOnTopItem?.state = on ? .on : .off
         NSLog("EpocCam: always on top %@", on ? "ON" : "OFF")
+    }
+
+    // Overlay buttons are AppKit views layered over VideoView — like the LED button, they
+    // never touch the CVPixelBuffer, so they stay out of the Syphon output.
+    private func makeOverlayButton(title: String, action: Selector, slot: CameraSlot) -> NSButton {
+        let b = NSButton(title: title, target: self, action: action)
+        b.tag = slot.rawValue
+        b.isBordered = false
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 6
+        b.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.45).cgColor
+        b.translatesAutoresizingMaskIntoConstraints = false
+        setOverlayTitle(b, title)
+        return b
+    }
+
+    // NSButton won't render an embedded newline via `title`; an attributed title with a
+    // centred paragraph style is what actually gives two centred lines.
+    private func setOverlayTitle(_ b: NSButton, _ title: String) {
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
+        b.attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: NSColor.white,
+            .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+            .paragraphStyle: para,
+        ])
+    }
+
+    @objc private func toggleFocusMode(_ sender: NSButton) {
+        guard let slot = CameraSlot(rawValue: sender.tag) else { return }
+        let goingManual = !(focusStates[slot] ?? .auto).isManual
+        browser.sendFocusCommand(slot: slot, goingManual ? .manual : .auto)
+        NSLog("EpocCam[%@]: focus %@ requested", slot.label, goingManual ? "MANUAL" : "AUTO")
+        // Deliberately no optimistic update: the phone reports the real state back, and
+        // showing a state it might not reach would be worse than a moment of lag.
+    }
+
+    @objc private func triggerRefocus(_ sender: NSButton) {
+        guard let slot = CameraSlot(rawValue: sender.tag) else { return }
+        browser.sendFocusCommand(slot: slot, .refocus)
+        NSLog("EpocCam[%@]: refocus requested", slot.label)
+    }
+
+    private func applyFocusAppearance(_ slot: CameraSlot) {
+        let st = focusStates[slot] ?? .auto
+        if let b = focusButtons[slot] { setOverlayTitle(b, st.label) }
+        refocusButtons[slot]?.isHidden = !st.isManual
     }
 
     @objc private func toggleLight(_ sender: NSButton) {
@@ -309,10 +360,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             light.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
         ])
 
+        // Focus controls, upper-left. Same wording as the phone's own button; the label is
+        // driven entirely by what the phone reports, so the two always agree.
+        let focus = makeOverlayButton(title: FocusState.auto.label,
+                                      action: #selector(toggleFocusMode(_:)), slot: slot)
+        pane.addSubview(focus)
+        // "Focus now" sits directly under it, and only exists in manual mode — in auto there
+        // is nothing to trigger.
+        let refocus = makeOverlayButton(title: "focus\nnow",
+                                        action: #selector(triggerRefocus(_:)), slot: slot)
+        refocus.isHidden = true
+        pane.addSubview(refocus)
+        NSLayoutConstraint.activate([
+            focus.topAnchor.constraint(equalTo: pane.topAnchor, constant: 8),
+            focus.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: 8),
+            focus.widthAnchor.constraint(equalToConstant: 76),
+            focus.heightAnchor.constraint(equalToConstant: 38),
+            refocus.topAnchor.constraint(equalTo: focus.bottomAnchor, constant: 6),
+            refocus.leadingAnchor.constraint(equalTo: focus.leadingAnchor),
+            refocus.widthAnchor.constraint(equalTo: focus.widthAnchor),
+            refocus.heightAnchor.constraint(equalToConstant: 38),
+        ])
+
         videoViews[slot]     = videoView
         statusLabels[slot]   = label
         statusOverlays[slot] = pill
         lightButtons[slot]   = light
+        focusButtons[slot]   = focus
+        refocusButtons[slot] = refocus
+        focusStates[slot]    = .auto
+        applyFocusAppearance(slot)
         torchOn[slot]        = false
         applyLightAppearance(slot)
         return pane
@@ -363,7 +440,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.titleLabels[slot]?.stringValue = "Camera \(slot.label)"
                 self.torchOn[slot] = false
                 self.applyLightAppearance(slot)
+                self.focusStates[slot] = .auto
+                self.applyFocusAppearance(slot)
             }
+        }
+        browser.onFocusState = { [weak self] slot, st in
+            guard let self else { return }
+            self.focusStates[slot] = st
+            self.applyFocusAppearance(slot)
         }
         browser.onBattery = { [weak self] slot, level, charging in
             guard let self else { return }

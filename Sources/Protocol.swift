@@ -29,6 +29,23 @@ enum CameraSlot: Int, CaseIterable {
     }
 }
 
+// What a phone's focus is actually doing. Mirrors FOCUS_STATE_* on the streamer — the
+// viewer never infers this, it is reported.
+enum FocusState: Int {
+    case auto = 0, manual = 1, busy = 2, unsure = 3
+
+    // Same wording as the phone's own button, so the two read identically.
+    var label: String {
+        switch self {
+        case .auto:   return "auto\nfocus"
+        case .manual: return "manual\nfocus"
+        case .busy:   return "focusing\n…"
+        case .unsure: return "manual\nfocus?"
+        }
+    }
+    var isManual: Bool { self != .auto }
+}
+
 enum PktType: UInt32 {
     case video      = 0x00020002
     case fmtSelect  = 0x00020003
@@ -36,6 +53,8 @@ enum PktType: UInt32 {
     case capability = 0x00020005
     case battery    = 0x00020006  // not in the original iPhone/Android wire protocol — our own
     case torch      = 0x00020007  // ditto: viewer -> phone, toggles the camera LED
+    case focusCmd   = 0x00020008  // viewer -> phone: set focus mode / trigger a refocus
+    case focusState = 0x00020009  // phone -> viewer: what the phone's focus is actually doing
 }
 
 struct PktHeader {
@@ -119,6 +138,21 @@ extension Data {
         self[b+1] = UInt8((v >> 8) & 0xFF)
         self[b+2] = UInt8((v >> 16) & 0xFF)
         self[b+3] = UInt8((v >> 24) & 0xFF)
+    }
+
+    // Focus commands, viewer → phone. Must match FOCUS_CMD_* on the streamer.
+    enum FocusCommand: UInt8 { case auto = 0, manual = 1, refocus = 2 }
+
+    // Build a focus-command packet, viewer → phone. Same 256-byte shape as format-select
+    // for the same reason: the phone reads fixed offsets from a single read.
+    static func focusCommandPacket(_ cmd: FocusCommand) -> Data {
+        var p = Data(count: 256)
+        p.putLeU32(kMagic,                     at: 0)
+        p.putLeU32(0,                          at: 4)
+        p.putLeU32(PktType.focusCmd.rawValue,  at: 8)
+        p.putLeU32(UInt32(244),                at: 12)
+        p[16] = cmd.rawValue
+        return p
     }
 
     // Build a torch (camera LED) packet, viewer → streamer. Same 256-byte shape as

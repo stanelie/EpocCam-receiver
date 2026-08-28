@@ -12,6 +12,8 @@ final class EpocCamConnection {
     var onFormats:    (([VideoFormat]) -> Void)?
     // Called whenever a battery packet arrives: (level 0-100, charging).
     var onBattery:    ((Int, Bool) -> Void)?
+    // Called whenever the phone reports what its focus is doing.
+    var onFocusState: ((FocusState) -> Void)?
 
     private let conn:    NWConnection
     private let queue:   DispatchQueue
@@ -141,6 +143,11 @@ final class EpocCamConnection {
         case PktType.video.rawValue:
             decoder.handle(payload: payload, flags: header.flags)
 
+        case PktType.focusState.rawValue:
+            guard payload.count >= 1, let st = FocusState(rawValue: Int(payload[0])) else { break }
+            NSLog("EpocCam: focus state: %d", st.rawValue)
+            onFocusState?(st)
+
         case PktType.battery.rawValue:
             guard payload.count >= 2 else { break }
             let level = Int(payload[0])
@@ -166,6 +173,13 @@ final class EpocCamConnection {
         conn.send(content: Data.torchPacket(on: on), completion: .contentProcessed { err in
             if let err { NSLog("EpocCam: torch send error: %@", err.localizedDescription) }
             else { NSLog("EpocCam: torch %@ sent", on ? "ON" : "OFF") }
+        })
+    }
+
+    func sendFocusCommand(_ cmd: Data.FocusCommand) {
+        guard live else { return }
+        conn.send(content: Data.focusCommandPacket(cmd), completion: .contentProcessed { err in
+            if let err { NSLog("EpocCam: focus cmd send error: %@", err.localizedDescription) }
         })
     }
 

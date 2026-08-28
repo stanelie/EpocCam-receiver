@@ -19,6 +19,8 @@ final class EpocCamBrowser {
     var onStatus:  ((CameraSlot, String) -> Void)?
     // Fired on the main thread whenever a phone reports its battery: (level 0-100, charging).
     var onBattery: ((CameraSlot, Int, Bool) -> Void)?
+    // Fired on the main thread when a phone reports its focus state.
+    var onFocusState: ((CameraSlot, FocusState) -> Void)?
 
     // One managed connection = one phone. Its slot is decided once it's live.
     private final class ManagedConn {
@@ -126,6 +128,14 @@ final class EpocCamBrowser {
             guard let self else { return }
             UserDefaults.standard.set(index, forKey: slot.lastFormatKey)
             self.conns.first { $0.slot == slot && $0.live }?.conn?.selectFormat(index: index)
+        }
+    }
+
+    // Operator control: set focus mode / trigger a refocus on this slot's phone.
+    func sendFocusCommand(slot: CameraSlot, _ cmd: Data.FocusCommand) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.conns.first { $0.slot == slot && $0.live }?.conn?.sendFocusCommand(cmd)
         }
     }
 
@@ -278,6 +288,10 @@ final class EpocCamBrowser {
         c.onBattery = { [weak self, weak mc] level, charging in
             guard let self, let mc, let slot = mc.slot else { return }
             self.postBattery(slot, level, charging)
+        }
+        c.onFocusState = { [weak self, weak mc] st in
+            guard let self, let mc, let slot = mc.slot else { return }
+            DispatchQueue.main.async { self.onFocusState?(slot, st) }
         }
         c.onConnected = { [weak self, weak mc] resolved in
             guard let self, let mc else { return }
