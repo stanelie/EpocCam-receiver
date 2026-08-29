@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let ndiLock = NSLock()
     private var ndiItem: NSMenuItem?
     private var ndiH264Item: NSMenuItem?
+    private var ndiSpeedHQItem: NSMenuItem?
     private static let kNDIKey = "EpocCamNDIOutput"
     private static let kNDIH264Key = "EpocCamNDIPassthrough"
     // Frame size from the decoded stream, needed to describe compressed frames to NDI
@@ -54,7 +55,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildWindow()
         setAlwaysOnTop(UserDefaults.standard.bool(forKey: Self.kAlwaysOnTopKey))
         setNDI(UserDefaults.standard.bool(forKey: Self.kNDIKey))
-        ndiH264Item?.state = ndiPassthrough ? .on : .off
         startPipeline()
     }
 
@@ -139,17 +139,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         outMenuItem.title = "Output"
         mainMenu.addItem(outMenuItem)
         let outMenu = NSMenu(title: "Output")
+        // Items are enabled/disabled explicitly: the encoding choices only mean anything
+        // while NDI output is actually on.
+        outMenu.autoenablesItems = false
         let ndiToggle = NSMenuItem(title: "NDI Output",
                                    action: #selector(toggleNDI(_:)),
                                    keyEquivalent: "n")
         outMenu.addItem(ndiToggle)
         if NDIBridge.supportsCompressed() {
-            let h264 = NSMenuItem(title: "NDI: H.264 passthrough (no re-encode)",
-                                  action: #selector(toggleNDIPassthrough(_:)),
-                                  keyEquivalent: "")
+            outMenu.addItem(NSMenuItem.separator())
+            let hdr = NSMenuItem(title: "NDI encoding", action: nil, keyEquivalent: "")
+            hdr.isEnabled = false
+            outMenu.addItem(hdr)
+            // Mutually exclusive: these are two ways of sending, not two outputs.
+            let shq = NSMenuItem(title: "    Re-encode as SpeedHQ",
+                                 action: #selector(selectNDISpeedHQ(_:)), keyEquivalent: "")
+            let h264 = NSMenuItem(title: "    Pass through H.264 (no re-encode)",
+                                  action: #selector(selectNDIPassthrough(_:)), keyEquivalent: "")
+            outMenu.addItem(shq)
             outMenu.addItem(h264)
+            ndiSpeedHQItem = shq
             ndiH264Item = h264
-            let warn = NSMenuItem(title: "⚠︎ Advanced SDK trial: stream stops after 30 min",
+            let warn = NSMenuItem(title: "    ⚠︎ passthrough uses the Advanced SDK trial: stops after 30 min",
                                   action: nil, keyEquivalent: "")
             warn.isEnabled = false
             outMenu.addItem(warn)
@@ -179,7 +190,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setNDI(_ on: Bool) {
         UserDefaults.standard.set(on, forKey: Self.kNDIKey)
-        ndiItem?.state = on ? .on : .off
         if on {
             for slot in CameraSlot.allCases where ndiSink(slot) == nil {
                 guard let b = NDIBridge(name: slot.syphonName) else {
@@ -192,18 +202,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ndiLock.lock(); ndi[slot] = b; ndiLock.unlock()
             }
         } else {
-            ndiLock.lock()
-            let sinks = ndi
-            ndi.removeAll()
-            ndiLock.unlock()
-            // Tear down on each slot's own queue so we can't destroy a sender while its
-            // async send is still in flight.
-            for (slot, sink) in sinks {
-                (ndiQueues[slot] ?? DispatchQueue.global()).async { sink.stop() }
-            }
-            ndiQueues.removeAll(); ndiGate.removeAll(); ndiDropped.removeAll()
+            tearDownNDI(completion: nil)
         }
         NSLog("EpocCam: NDI output %@", on ? "ON" : "OFF")
+        syncOutputMenu()
+    }
+
+    // Destroys the senders and reports back only once they are really gone. Teardown runs on
+    // each slot's own queue so a sender can't be destroyed mid-send, which means it completes
+    // *after* this returns — so anything that recreates a sender with the same name has to
+    // wait for the completion rather than run straight away.
+    private func tearDownNDI(completion: (() -> Void)?) {
+        ndiLock.lock()
+        let sinks = ndi
+        ndi.removeAll()
+        ndiLock.unlock()
+        let queues = ndiQueues
+        ndiQueues.removeAll(); ndiGate.removeAll(); ndiDropped.removeAll()
+
+        let group = DispatchGroup()
+        for (slot, sink) in sinks {
+            let q = queues[slot] ?? DispatchQueue.global()
+            group.enter()
+            q.async { sink.stop(); group.leave() }
+        }
+        guard let completion else { return }
+        group.notify(queue: .main) {
+            // Small settle before reusing the same source names, so NDI has actually
+            // released them and a receiver sees a clean drop-and-return rather than a
+            // duplicate name.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: completion)
+        }
     }
 
     private func ndiSink(_ slot: CameraSlot) -> NDIBridge? {
@@ -230,12 +259,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleNDIPassthrough(_ sender: Any?) {
-        let on = !UserDefaults.standard.bool(forKey: Self.kNDIH264Key)
+    @objc private func selectNDISpeedHQ(_ sender: Any?)    { setNDIPassthrough(false) }
+    @objc private func selectNDIPassthrough(_ sender: Any?) { setNDIPassthrough(true) }
+
+    private func setNDIPassthrough(_ on: Bool) {
+        let changed = UserDefaults.standard.bool(forKey: Self.kNDIH264Key) != on
         UserDefaults.standard.set(on, forKey: Self.kNDIH264Key)
-        ndiH264Item?.state = on ? .on : .off
-        NSLog("EpocCam: NDI H.264 passthrough %@%@", on ? "ON" : "OFF",
-              on ? " — Advanced SDK trial stops the stream ~30 min after the sender starts" : "")
+        syncOutputMenu()
+        NSLog("EpocCam: NDI encoding = %@", on ? "H.264 passthrough" : "SpeedHQ")
+
+        // Recycle the senders on a real change. This switches the frame format
+        // (BGRA <-> H.264) and a receiver that already negotiated the old one does not
+        // renegotiate on a live sender — it just sits on the last frame it understood.
+        // Dropping and recreating the source makes the receiver reconnect and pick up
+        // the new format.
+        if changed, UserDefaults.standard.bool(forKey: Self.kNDIKey) {
+            NSLog("EpocCam: recycling NDI senders for the format change")
+            tearDownNDI { [weak self] in
+                guard let self, UserDefaults.standard.bool(forKey: Self.kNDIKey) else { return }
+                self.setNDI(true)
+                NSLog("EpocCam: NDI senders back up in %@ mode",
+                      self.ndiPassthrough ? "H.264 passthrough" : "SpeedHQ")
+            }
+        }
+    }
+
+    private func syncOutputMenu() {
+        let ndiOn = UserDefaults.standard.bool(forKey: Self.kNDIKey)
+        let pass  = ndiPassthrough
+        ndiItem?.state        = ndiOn ? .on : .off
+        ndiSpeedHQItem?.state = pass ? .off : .on
+        ndiH264Item?.state    = pass ? .on : .off
+        // Deliberately still selectable while NDI output is off, so the mode can be chosen
+        // first and the master toggle then brings NDI up already in that mode.
+        ndiSpeedHQItem?.isEnabled = true
+        ndiH264Item?.isEnabled    = true
+        _ = ndiOn
     }
 
     // Gated on the build actually supporting it: the preference persists across builds, so a
@@ -585,6 +644,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.applyFocusAppearance(slot)
             }
         }
+        // Only wire the compressed tap in builds that can use it. Connection.swift skips the
+        // per-frame Annex-B scan entirely when this is nil, so a base-SDK build does no work
+        // for a path it cannot take.
+        if NDIBridge.supportsCompressed() {
         browser.onCompressedVideo = { [weak self] slot, frame, isKey, sets in
             guard let self, self.ndiPassthrough else { return }
             guard let (w, h) = self.lastFrameSize[slot] else { return }   // wait for one decoded frame
@@ -597,6 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                         keyframe: isKey, width: Int32(w), height: Int32(h))
                 gate.signal()
             }
+        }
         }
         browser.onFocusState = { [weak self] slot, st in
             guard let self else { return }

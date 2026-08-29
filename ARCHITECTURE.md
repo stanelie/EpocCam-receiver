@@ -76,6 +76,26 @@ Feeding the camera straight into `MediaCodec.createInputSurface()` is the docume
 
 The general lesson: this is a **vendor driver** workaround, so it must be gated on the vendor. An OS-version gate is not a proxy for a hardware quirk — the two phones in use here (a Qualcomm Pixel 5 and an Exynos S6) happen to share an API level while needing opposite capture paths.
 
+## Viewer: NDI output (optional, alongside Syphon)
+
+Syphon is the primary output and is always on: `publishPixelBuffer` binds the decoded frame's IOSurface directly as a GL texture — zero-copy, nothing re-encoded. NDI exists only for consumers that can't speak Syphon, and is off by default.
+
+**It runs on a per-slot queue and is issued last**, so Syphon and the preview can never wait on it, with a semaphore bounding it to one frame in flight — a slow send drops the new frame rather than queuing a backlog, which costs less latency than working through stale frames.
+
+**Send asynchronously.** This is load-bearing and was learned the hard way: switching to the synchronous send (on safety grounds, see below) added **~1 s of lag versus Syphon**. The SDK pipelines colour conversion, compression and network send across its own threads and explicitly recommends async for BGRA; sending synchronously serialises all of that inline. The buffer is retained until the next send, which the SDK documents as the synchronizing event.
+
+**Recreate the senders when the frame format changes.** A receiver that has negotiated BGRA does not renegotiate on a live sender — it sits on the last frame it understood. Teardown runs on each slot's own queue and therefore completes *after* the call returns, so the recreate must wait on a `DispatchGroup` (plus a short settle) rather than run immediately; otherwise new senders are created under names the old ones still hold.
+
+### H.264 passthrough: built, measured, and not worth it
+
+The phone already sends H.264, so forwarding it to NDI skips the decode→SpeedHQ→decode round trip entirely. This is implemented and selectable (`Output ▸ NDI encoding`), gated behind `USE_NDI_ADVANCED=1 ./build.sh`.
+
+**Measured result: no perceptible latency difference from SpeedHQ.** Compared in Millumin against Syphon, the phone's own native NDI sender, and this bridge — all displayed effectively together. So the round trip was never the bottleneck, and the passthrough does not justify what it costs.
+
+What it costs is the **NDI Advanced SDK**, whose development licence silently stops delivering the stream after **30 minutes** on desktop (5 minutes on mobile): the sender keeps reporting success while receivers get nothing. That's why it is a build switch rather than only a menu item — linking the Advanced library unconditionally would put that cliff under the working SpeedHQ path too. The default build uses the base SDK and has no limit. No attempt is made to work around the gate; a commercial licence is the fix if it is ever needed.
+
+Implementation details, confirmed against the SDK's own `NDIlib_Send_H264` example rather than inferred: Annex-B framing (already what the phone sends), a 44-byte `NDIlib_compressed_packet_t` prefix, SPS/PPS as `extra_data` on keyframes only, and a scatter-gather send so nothing is concatenated. The passthrough send stays synchronous — it does no encoding, so there is nothing to pipeline.
+
 ## Building
 
 - **Receiver:** `./build.sh` — compiles a universal (Apple Silicon + Intel) app with `swiftc`. New Swift source files must be added to the `SWIFT_SRCS` list in `build.sh`. Runs on macOS 11+. The build is unsigned, so first launch on another Mac needs right-click ▸ Open.

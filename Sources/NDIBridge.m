@@ -9,6 +9,9 @@
     NDIlib_send_instance_t _sender;
     NSLock *_lock;
     int64_t _frameIndex;   // drives monotonic pts/dts; only ordering matters to NDI
+    // Async send hands NDI a pointer it reads after returning; the SDK documents the next
+    // async send as the synchronizing event, so the previous frame is held until then.
+    CVPixelBufferRef _inFlight;
 }
 
 + (BOOL)ensureRuntime {
@@ -68,13 +71,20 @@
     frame.p_data               = (uint8_t *)CVPixelBufferGetBaseAddress(pixelBuffer);
     frame.line_stride_in_bytes = (int)CVPixelBufferGetBytesPerRow(pixelBuffer);
 
-    // Synchronous on purpose. The async variant hands NDI a pointer it may hold well past
-    // the next send — the SDK's own docs note a stalled receiver can block completion — and
-    // getting that wrong is a use-after-free. This call runs on a per-slot NDI queue that
-    // nothing else waits on, so blocking here cannot affect Syphon or the preview.
-    NDIlib_send_send_video_v2(_sender, &frame);
+    // Asynchronous, and that matters for latency: the SDK pipelines colour conversion,
+    // compression and network send across its own threads, which it explicitly recommends
+    // for BGRA. Sending synchronously here serialises all of that inline and measurably
+    // added ~1s of lag versus Syphon. Per the SDK docs the next async send is a
+    // synchronizing event, so the previous frame is safe to release at that point.
+    CVPixelBufferRetain(pixelBuffer);
+    NDIlib_send_send_video_async_v2(_sender, &frame);
 
-    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    if (_inFlight) {
+        CVPixelBufferUnlockBaseAddress(_inFlight, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(_inFlight);
+    }
+    _inFlight = pixelBuffer;   // stays locked until the next send retires it
+
     [_lock unlock];
 }
 
@@ -155,8 +165,16 @@
 - (void)stop {
     [_lock lock];
     if (_sender) {
+        // Flush the async pipeline before teardown so NDI isn't left reading a buffer we
+        // are about to release.
+        NDIlib_send_send_video_async_v2(_sender, NULL);
         NDIlib_send_destroy(_sender);
         _sender = NULL;
+    }
+    if (_inFlight) {
+        CVPixelBufferUnlockBaseAddress(_inFlight, kCVPixelBufferLock_ReadOnly);
+        CVPixelBufferRelease(_inFlight);
+        _inFlight = NULL;
     }
     [_lock unlock];
 }
