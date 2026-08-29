@@ -21,6 +21,8 @@ final class EpocCamBrowser {
     var onBattery: ((CameraSlot, Int, Bool) -> Void)?
     // Fired on the main thread when a phone reports its focus state.
     var onFocusState: ((CameraSlot, FocusState) -> Void)?
+    // Fired on the main thread when a phone reports stabilization capability/state.
+    var onStabilization: ((CameraSlot, StabilizationState) -> Void)?
     // Compressed H.264 straight from the phone, for the NDI passthrough path. Delivered on
     // the connection queue, not the main thread — it is a high-rate data path.
     var onCompressedVideo: ((CameraSlot, Data, Bool, Data?) -> Void)?
@@ -131,6 +133,14 @@ final class EpocCamBrowser {
             guard let self else { return }
             UserDefaults.standard.set(index, forKey: slot.lastFormatKey)
             self.conns.first { $0.slot == slot && $0.live }?.conn?.selectFormat(index: index)
+        }
+    }
+
+    // Operator control: electronic stabilization on/off for this slot's phone.
+    func setStabilization(slot: CameraSlot, on: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.conns.first { $0.slot == slot && $0.live }?.conn?.setStabilization(on: on)
         }
     }
 
@@ -295,6 +305,10 @@ final class EpocCamBrowser {
         c.onCompressedVideo = { [weak self, weak mc] frame, isKey, sets in
             guard let self, let mc, let slot = mc.slot else { return }
             self.onCompressedVideo?(slot, frame, isKey, sets)
+        }
+        c.onStabilization = { [weak self, weak mc] st in
+            guard let self, let mc, let slot = mc.slot else { return }
+            DispatchQueue.main.async { self.onStabilization?(slot, st) }
         }
         c.onFocusState = { [weak self, weak mc] st in
             guard let self, let mc, let slot = mc.slot else { return }

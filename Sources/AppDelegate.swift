@@ -38,6 +38,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var refocusButtons: [CameraSlot: NSButton]     = [:]
     // Reported by the phone, never inferred here — the button mirrors the phone.
     private var focusStates:    [CameraSlot: FocusState]   = [:]
+    // Reported by the phone: capability travels with state, so the menu reflects what this
+    // particular camera can actually do rather than assuming.
+    private var stabStates:     [CameraSlot: StabilizationState] = [:]
+    private var stabItems:      [CameraSlot: NSMenuItem]  = [:]
     // What we last *asked* each phone to do. The phone doesn't acknowledge, so this tracks
     // the request, not confirmed hardware state.
     private var torchOn:        [CameraSlot: Bool]         = [:]
@@ -120,6 +124,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         camMenu.addItem(withTitle: "Swap A ↔ B",
                         action: #selector(swapCameras(_:)),
                         keyEquivalent: "s")
+        camMenu.addItem(NSMenuItem.separator())
+        camMenu.autoenablesItems = false
+        let stabHdr = NSMenuItem(title: "Digital stabilization (crops; may add latency)",
+                                 action: nil, keyEquivalent: "")
+        stabHdr.isEnabled = false
+        camMenu.addItem(stabHdr)
+        for slot in CameraSlot.allCases {
+            let item = NSMenuItem(title: "    Camera \(slot.label)",
+                                  action: #selector(toggleStabilization(_:)), keyEquivalent: "")
+            item.tag = slot.rawValue
+            item.isEnabled = false      // until a phone reports it can do this
+            camMenu.addItem(item)
+            stabItems[slot] = item
+        }
         camMenuItem.submenu = camMenu
 
         // Window menu — keep the viewer above Millumin while operating it.
@@ -382,6 +400,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         b.alphaValue = on ? 1.0 : 0.65
     }
 
+    @objc private func toggleStabilization(_ sender: NSMenuItem) {
+        guard let slot = CameraSlot(rawValue: sender.tag) else { return }
+        let st = stabStates[slot] ?? StabilizationState()
+        guard st.eisSupported else { return }
+        browser.setStabilization(slot: slot, on: !st.eisOn)
+        NSLog("EpocCam[%@]: digital stabilization %@ requested", slot.label, st.eisOn ? "OFF" : "ON")
+        // No optimistic update — the phone reports back what it actually applied.
+    }
+
+    private func applyStabilizationMenu(_ slot: CameraSlot) {
+        guard let item = stabItems[slot] else { return }
+        let st = stabStates[slot] ?? StabilizationState()
+        item.isEnabled = st.eisSupported
+        item.state = st.eisOn ? .on : .off
+        // Say why it's unavailable rather than leaving a dead greyed row.
+        item.title = "    Camera \(slot.label)" + (st.eisSupported ? "" : " — not supported")
+    }
+
     @objc private func swapCameras(_ sender: Any?) {
         browser.swapSlots()
     }
@@ -642,6 +678,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.applyLightAppearance(slot)
                 self.focusStates[slot] = .auto
                 self.applyFocusAppearance(slot)
+                self.stabStates[slot] = StabilizationState()
+                self.applyStabilizationMenu(slot)
             }
         }
         // Only wire the compressed tap in builds that can use it. Connection.swift skips the
@@ -661,6 +699,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 gate.signal()
             }
         }
+        }
+        browser.onStabilization = { [weak self] slot, st in
+            guard let self else { return }
+            self.stabStates[slot] = st
+            self.applyStabilizationMenu(slot)
+            NSLog("EpocCam[%@]: OIS %@, EIS %@", slot.label,
+                  st.oisSupported ? (st.oisOn ? "on" : "available") : "unavailable",
+                  st.eisSupported ? (st.eisOn ? "on" : "off") : "unavailable")
         }
         browser.onFocusState = { [weak self] slot, st in
             guard let self else { return }

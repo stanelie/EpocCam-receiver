@@ -46,6 +46,15 @@ enum FocusState: Int {
     var isManual: Bool { self != .auto }
 }
 
+// What a phone reports about its stabilization. Capability travels with state so the viewer
+// can hide the control on a camera that can't do it, rather than offering a dead button.
+struct StabilizationState {
+    var eisSupported = false
+    var eisOn        = false
+    var oisSupported = false
+    var oisOn        = false
+}
+
 enum PktType: UInt32 {
     case video      = 0x00020002
     case fmtSelect  = 0x00020003
@@ -55,6 +64,8 @@ enum PktType: UInt32 {
     case torch      = 0x00020007  // ditto: viewer -> phone, toggles the camera LED
     case focusCmd   = 0x00020008  // viewer -> phone: set focus mode / trigger a refocus
     case focusState = 0x00020009  // phone -> viewer: what the phone's focus is actually doing
+    case stabCmd    = 0x0002000A  // viewer -> phone: electronic stabilization on/off
+    case stabState  = 0x0002000B  // phone -> viewer: stabilization capability + state
 }
 
 struct PktHeader {
@@ -142,6 +153,18 @@ extension Data {
 
     // Focus commands, viewer → phone. Must match FOCUS_CMD_* on the streamer.
     enum FocusCommand: UInt8 { case auto = 0, manual = 1, refocus = 2 }
+
+    // Build an electronic-stabilization command, viewer → phone. (There is no OIS command:
+    // optical stabilization costs nothing, so the phone just enables it wherever present.)
+    static func stabilizationPacket(on: Bool) -> Data {
+        var p = Data(count: 256)
+        p.putLeU32(kMagic,                    at: 0)
+        p.putLeU32(0,                         at: 4)
+        p.putLeU32(PktType.stabCmd.rawValue,  at: 8)
+        p.putLeU32(UInt32(244),               at: 12)
+        p[16] = on ? 1 : 0
+        return p
+    }
 
     // Build a focus-command packet, viewer → phone. Same 256-byte shape as format-select
     // for the same reason: the phone reads fixed offsets from a single read.

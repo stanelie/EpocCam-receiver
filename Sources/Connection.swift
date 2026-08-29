@@ -14,6 +14,8 @@ final class EpocCamConnection {
     var onBattery:    ((Int, Bool) -> Void)?
     // Called whenever the phone reports what its focus is doing.
     var onFocusState: ((FocusState) -> Void)?
+    // Called when the phone reports stabilization capability/state.
+    var onStabilization: ((StabilizationState) -> Void)?
     // The compressed H.264 exactly as the phone sent it, for the NDI passthrough path:
     // (annexB frame, isKeyframe, parameterSets for keyframes). Fires alongside decoding,
     // never instead of it — Syphon and the preview still need decoded frames.
@@ -157,6 +159,15 @@ final class EpocCamConnection {
             NSLog("EpocCam: focus state: %d", st.rawValue)
             onFocusState?(st)
 
+        case PktType.stabState.rawValue:
+            guard payload.count >= 4 else { break }
+            let st = StabilizationState(eisSupported: payload[0] != 0, eisOn: payload[1] != 0,
+                                        oisSupported: payload[2] != 0, oisOn: payload[3] != 0)
+            NSLog("EpocCam: stabilization EIS(sup=%@ on=%@) OIS(sup=%@ on=%@)",
+                  st.eisSupported ? "y":"n", st.eisOn ? "y":"n",
+                  st.oisSupported ? "y":"n", st.oisOn ? "y":"n")
+            onStabilization?(st)
+
         case PktType.battery.rawValue:
             guard payload.count >= 2 else { break }
             let level = Int(payload[0])
@@ -197,6 +208,11 @@ final class EpocCamConnection {
             if let err { NSLog("EpocCam: torch send error: %@", err.localizedDescription) }
             else { NSLog("EpocCam: torch %@ sent", on ? "ON" : "OFF") }
         })
+    }
+
+    func setStabilization(on: Bool) {
+        guard live else { return }
+        conn.send(content: Data.stabilizationPacket(on: on), completion: .contentProcessed { _ in })
     }
 
     func sendFocusCommand(_ cmd: Data.FocusCommand) {
