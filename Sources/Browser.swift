@@ -21,6 +21,9 @@ final class EpocCamBrowser {
     var onBattery: ((CameraSlot, Int, Bool) -> Void)?
     // Fired on the main thread when a phone reports its focus state.
     var onFocusState: ((CameraSlot, FocusState) -> Void)?
+    // Compressed H.264 straight from the phone, for the NDI passthrough path. Delivered on
+    // the connection queue, not the main thread — it is a high-rate data path.
+    var onCompressedVideo: ((CameraSlot, Data, Bool, Data?) -> Void)?
 
     // One managed connection = one phone. Its slot is decided once it's live.
     private final class ManagedConn {
@@ -288,6 +291,10 @@ final class EpocCamBrowser {
         c.onBattery = { [weak self, weak mc] level, charging in
             guard let self, let mc, let slot = mc.slot else { return }
             self.postBattery(slot, level, charging)
+        }
+        c.onCompressedVideo = { [weak self, weak mc] frame, isKey, sets in
+            guard let self, let mc, let slot = mc.slot else { return }
+            self.onCompressedVideo?(slot, frame, isKey, sets)
         }
         c.onFocusState = { [weak self, weak mc] st in
             guard let self, let mc, let slot = mc.slot else { return }

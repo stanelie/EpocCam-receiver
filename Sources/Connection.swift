@@ -14,6 +14,14 @@ final class EpocCamConnection {
     var onBattery:    ((Int, Bool) -> Void)?
     // Called whenever the phone reports what its focus is doing.
     var onFocusState: ((FocusState) -> Void)?
+    // The compressed H.264 exactly as the phone sent it, for the NDI passthrough path:
+    // (annexB frame, isKeyframe, parameterSets for keyframes). Fires alongside decoding,
+    // never instead of it — Syphon and the preview still need decoded frames.
+    var onCompressedVideo: ((Data, Bool, Data?) -> Void)?
+
+    // Last SPS+PPS seen, so a keyframe can carry them even when they arrived in a separate
+    // config packet rather than bundled with the IDR.
+    private var parameterSets: Data?
 
     private let conn:    NWConnection
     private let queue:   DispatchQueue
@@ -142,6 +150,7 @@ final class EpocCamConnection {
 
         case PktType.video.rawValue:
             decoder.handle(payload: payload, flags: header.flags)
+            forwardCompressed(payload: payload, flags: header.flags)
 
         case PktType.focusState.rawValue:
             guard payload.count >= 1, let st = FocusState(rawValue: Int(payload[0])) else { break }
@@ -158,6 +167,20 @@ final class EpocCamConnection {
         default:
             NSLog("EpocCam: unknown packet type 0x%08X (%d bytes)", header.type, payload.count)
         }
+    }
+
+    private func forwardCompressed(payload: Data, flags: UInt32) {
+        guard onCompressedVideo != nil else { return }
+        // The decoder-reset sentinel isn't video; don't forward it.
+        if payload == kResetPayload { return }
+        // A config-only packet carries SPS/PPS and no picture — remember, emit nothing.
+        if flags & kFlagConfig != 0 {
+            parameterSets = extractParameterSets(payload) ?? parameterSets
+            return
+        }
+        let isKey = annexBContainsIDR(payload)
+        if isKey, let sets = extractParameterSets(payload) { parameterSets = sets }
+        onCompressedVideo?(payload, isKey, isKey ? parameterSets : nil)
     }
 
     func selectFormat(index: Int) {

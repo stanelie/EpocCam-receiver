@@ -16,6 +16,17 @@
 // VideoDecoder already produces, so there is no pixel conversion on this path.
 - (void)sendPixelBuffer:(CVPixelBufferRef)pixelBuffer;
 
+// H.264 passthrough (NDI Advanced SDK builds only). Forwards the phone's already-compressed
+// frame instead of re-encoding to SpeedHQ. Returns NO if this build has no Advanced SDK.
+- (BOOL)sendCompressed:(NSData *)frame
+                 extra:(NSData *)parameterSets
+              keyframe:(BOOL)isKeyframe
+                 width:(int)width
+                height:(int)height;
+
+// YES if this build can do H.264 passthrough at all.
++ (BOOL)supportsCompressed;
+
 - (void)stop;
 
 @end

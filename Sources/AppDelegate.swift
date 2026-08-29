@@ -22,7 +22,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // The sinks are created/torn down on the main thread but read on the frame thread.
     private let ndiLock = NSLock()
     private var ndiItem: NSMenuItem?
+    private var ndiH264Item: NSMenuItem?
     private static let kNDIKey = "EpocCamNDIOutput"
+    private static let kNDIH264Key = "EpocCamNDIPassthrough"
+    // Frame size from the decoded stream, needed to describe compressed frames to NDI
+    // (the passthrough path never looks at pixels).
+    private var lastFrameSize: [CameraSlot: (Int, Int)] = [:]
     private var videoViews:     [CameraSlot: VideoView]    = [:]
     private var statusLabels:   [CameraSlot: NSTextField]  = [:]
     private var statusOverlays: [CameraSlot: NSView]       = [:]
@@ -49,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildWindow()
         setAlwaysOnTop(UserDefaults.standard.bool(forKey: Self.kAlwaysOnTopKey))
         setNDI(UserDefaults.standard.bool(forKey: Self.kNDIKey))
+        ndiH264Item?.state = ndiPassthrough ? .on : .off
         startPipeline()
     }
 
@@ -137,6 +143,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                    action: #selector(toggleNDI(_:)),
                                    keyEquivalent: "n")
         outMenu.addItem(ndiToggle)
+        if NDIBridge.supportsCompressed() {
+            let h264 = NSMenuItem(title: "NDI: H.264 passthrough (no re-encode)",
+                                  action: #selector(toggleNDIPassthrough(_:)),
+                                  keyEquivalent: "")
+            outMenu.addItem(h264)
+            ndiH264Item = h264
+            let warn = NSMenuItem(title: "⚠︎ Advanced SDK trial: stream stops after 30 min",
+                                  action: nil, keyEquivalent: "")
+            warn.isEnabled = false
+            outMenu.addItem(warn)
+        }
         outMenu.addItem(NSMenuItem.separator())
         let note = NSMenuItem(title: "Syphon is always on (\"EpocCam A\" / \"EpocCam B\")",
                               action: nil, keyEquivalent: "")
@@ -211,6 +228,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             sink.send(pixelBuffer)
             gate.signal()
         }
+    }
+
+    @objc private func toggleNDIPassthrough(_ sender: Any?) {
+        let on = !UserDefaults.standard.bool(forKey: Self.kNDIH264Key)
+        UserDefaults.standard.set(on, forKey: Self.kNDIH264Key)
+        ndiH264Item?.state = on ? .on : .off
+        NSLog("EpocCam: NDI H.264 passthrough %@%@", on ? "ON" : "OFF",
+              on ? " — Advanced SDK trial stops the stream ~30 min after the sender starts" : "")
+    }
+
+    // Gated on the build actually supporting it: the preference persists across builds, so a
+    // base-SDK build must not honour a passthrough flag left set by an Advanced build — it
+    // would skip the uncompressed send while sendCompressed does nothing, and NDI would go
+    // silently dead.
+    private var ndiPassthrough: Bool {
+        NDIBridge.supportsCompressed() && UserDefaults.standard.bool(forKey: Self.kNDIH264Key)
     }
 
     @objc private func toggleAlwaysOnTop(_ sender: Any?) {
@@ -552,6 +585,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.applyFocusAppearance(slot)
             }
         }
+        browser.onCompressedVideo = { [weak self] slot, frame, isKey, sets in
+            guard let self, self.ndiPassthrough else { return }
+            guard let (w, h) = self.lastFrameSize[slot] else { return }   // wait for one decoded frame
+            guard let sink = self.ndiSink(slot),
+                  let queue = self.ndiQueues[slot],
+                  let gate = self.ndiGate[slot] else { return }
+            guard gate.wait(timeout: .now()) == .success else { return }  // drop, never queue
+            queue.async {
+                _ = sink.sendCompressed(frame, extra: sets ?? Data(),
+                                        keyframe: isKey, width: Int32(w), height: Int32(h))
+                gate.signal()
+            }
+        }
         browser.onFocusState = { [weak self] slot, st in
             guard let self else { return }
             self.focusStates[slot] = st
@@ -572,8 +618,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.videoViews[slot]?.display(pixelBuffer: pixelBuffer)
             self.syphon[slot]?.publishPixelBuffer(pixelBuffer)
-            // Last, and off-thread: Syphon and the preview never wait on NDI.
-            self.publishNDI(slot, pixelBuffer)
+            self.lastFrameSize[slot] = (CVPixelBufferGetWidth(pixelBuffer),
+                                        CVPixelBufferGetHeight(pixelBuffer))
+            // Last, and off-thread: Syphon and the preview never wait on NDI. Skipped in
+            // passthrough mode, where compressed frames feed NDI instead.
+            if !self.ndiPassthrough { self.publishNDI(slot, pixelBuffer) }
         }
         browser.start()
     }

@@ -181,6 +181,42 @@ extension Data {
     }
 }
 
+// Does this Annex-B buffer contain an IDR (NAL type 5)? NDI needs each compressed frame
+// flagged as a keyframe or not. Scans start codes directly rather than splitting the whole
+// buffer, since this runs on every frame.
+func annexBContainsIDR(_ data: Data) -> Bool {
+    let b = data.startIndex == 0 ? data : Data(data)
+    var i = 0
+    while i + 3 < b.count {
+        if b[i] == 0, b[i+1] == 0 {
+            var nal = -1
+            if b[i+2] == 1 { nal = i + 3 }
+            else if b[i+2] == 0, i + 4 < b.count, b[i+3] == 1 { nal = i + 4 }
+            if nal >= 0, nal < b.count {
+                if (b[nal] & 0x1F) == 5 { return true }
+                i = nal
+                continue
+            }
+        }
+        i += 1
+    }
+    return false
+}
+
+// Pull just the SPS (7) and PPS (8) NALs out, re-emitted with 4-byte start codes. NDI wants
+// these as a keyframe's "extra data".
+func extractParameterSets(_ data: Data) -> Data? {
+    var out = Data()
+    for nal in splitAnnexB(data) where !nal.isEmpty {
+        let t = Int(nal[nal.startIndex] & 0x1F)
+        if t == 7 || t == 8 {
+            out.append(contentsOf: [0, 0, 0, 1])
+            out.append(nal)
+        }
+    }
+    return out.isEmpty ? nil : out
+}
+
 // Split an Annex-B byte stream into raw NAL units (start codes stripped).
 // Handles both 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes.
 func splitAnnexB(_ data: Data) -> [Data] {

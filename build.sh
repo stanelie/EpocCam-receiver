@@ -13,14 +13,30 @@ echo "==> Cleaning build dir"
 rm -rf "$BUILD"
 mkdir -p "$MACOS" "$FW" "$RES"
 
-NDI_SDK="/Library/NDI SDK for Apple"
-if [ ! -f "$NDI_SDK/lib/macOS/libndi.dylib" ]; then
+# NDI: base SDK by default. The Advanced SDK adds H.264 passthrough, but its development
+# license stops delivering the stream after 30 minutes on desktop (silently — the sender
+# keeps reporting success while receivers get nothing), so it is opt-in and must not be
+# used for shows without a commercial license.
+#   ./build.sh                      -> base SDK, SpeedHQ only, no time limit
+#   USE_NDI_ADVANCED=1 ./build.sh   -> Advanced SDK, adds H.264 passthrough, 30-min trial
+if [ "${USE_NDI_ADVANCED:-0}" = "1" ]; then
+  NDI_SDK="/Library/NDI Advanced SDK for Apple"
+  NDI_LIB="libndi_advanced.dylib"
+  NDI_DEFINE="-DNDI_ADVANCED=1"
+  echo "==> NDI: Advanced SDK (H.264 passthrough enabled — 30-MINUTE TRIAL LIMIT)"
+else
+  NDI_SDK="/Library/NDI SDK for Apple"
+  NDI_LIB="libndi.dylib"
+  NDI_DEFINE=""
+  echo "==> NDI: base SDK (SpeedHQ only, no time limit)"
+fi
+if [ ! -f "$NDI_SDK/lib/macOS/$NDI_LIB" ]; then
   echo "!! NDI SDK not found at $NDI_SDK — install it from ndi.video" >&2
   exit 1
 fi
 
-echo "==> Copying libndi.dylib"
-cp "$NDI_SDK/lib/macOS/libndi.dylib" "$FW/"
+echo "==> Copying $NDI_LIB"
+cp "$NDI_SDK/lib/macOS/$NDI_LIB" "$FW/"
 # Its install name is already @rpath/libndi.dylib, and the binary below is linked with
 # an @executable_path/../Frameworks rpath, so no install_name_tool fixup is needed.
 
@@ -55,6 +71,7 @@ for ARCH in arm64 x86_64; do
     -F"$PROJ/Frameworks" \
     -I"$PROJ/Sources" \
     -I"$NDI_SDK/include" \
+    $NDI_DEFINE \
     -c "$PROJ/Sources/NDIBridge.m" \
     -o "$OBJDIR/$ARCH/NDIBridge.o"
 done
@@ -80,7 +97,7 @@ for ARCH in arm64 x86_64; do
     "${SWIFT_SRCS[@]}" \
     "$OBJDIR/$ARCH/SyphonBridge.o" \
     "$OBJDIR/$ARCH/NDIBridge.o" \
-    "$NDI_SDK/lib/macOS/libndi.dylib" \
+    "$NDI_SDK/lib/macOS/$NDI_LIB" \
     -framework Cocoa \
     -framework AVFoundation \
     -framework CoreVideo \
