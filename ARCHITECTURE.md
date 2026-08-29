@@ -114,6 +114,53 @@ EIS itself costs no measurable latency on any path (100.5 ms mean across off/on/
 
 `CameraEncoder` logs what the HAL actually applied (`APPLIED: videoStab=… ois=…`, rate-limited), which is what separated "the HAL refused" from "the HAL accepted and did nothing".
 
+## Frame rate: 30 or 60, per camera
+
+Selectable per slot from the viewer's **Frame rate** menu, persisted (`EpocCamFrameRate.A/B`) and re-applied on connect, exactly like the resolution and EIS choices.
+
+60fps buys roughly **one 30fps frame interval** of latency. Measured on a Pixel 5 at 720p, EIS on, single phone:
+
+| | 30 fps | 60 fps | Δ |
+| --- | --- | --- | --- |
+| First round | 89.9 ms | 58.5 ms | 31 ms |
+| Second round | 126.1 ms | 90.4 ms | 36 ms |
+
+The **absolute** numbers are not reproducible between sessions — they drift with AE exposure time (room lighting) — so only same-session A/B comparisons mean anything here. Both rounds agree on the ~33 ms delta, which is the expected physical result. Bitrate does **not** change: CBR holds 3.5 Mbps and per-frame quality halves instead.
+
+**Capability is negotiated, not assumed.** `CONTROL_AE_TARGET_FPS_RANGE` only accepts a range the HAL advertises; asking for one it doesn't list fails session configuration outright (black preview). The Pixel 5 advertises `[60,60]`; the Galaxy S7 tops out at `[30,30]`. So the phone reports capability and its *actual* rate back (`0x0002000D`), the viewer greys out 60 where unsupported, and a 60 request that reaches an incapable phone is clamped to 30 rather than failing. A fixed `[t,t]` range is preferred over `[x,t]` so AE can't drop the rate and lengthen exposure in dim light.
+
+**The rebuild must not run on the main thread.** MediaCodec's frame rate and the camera's AE range are both fixed at construction, so a rate change tears down and rebuilds the encoder — and `CameraEncoder.stop()` blocks on the camera close. Dispatched via `runOnUiThread` it freezes the preview on its last frame and stalls reconnect handling until the close returns. It runs on the socket receive thread, like the resolution change it shares `rebuildEncoderForFormat` with.
+
+**A same-size rebuild must hand over the preview surface itself.** `surfaceChanged()` is the only thing that gives a new encoder the phone's preview holder, and it fires on a *size* change. A resolution change resizes the view so it fires; a frame-rate change keeps identical geometry, so nothing resizes, the callback never comes, and an encoder built with a null holder leaves the phone's own preview frozen on its last frame **forever** while the stream — a separate surface — carries on looking perfectly healthy. `rebuildEncoderForFormat(geometryChanged:)` passes the live holder in that case and skips the relayout, which also removes a ~500 ms main-thread stall.
+
+**Record the rate the camera delivered, not the one requested.** A phone that clamps 60→30 while `desiredFps` remembers 60 disagrees with its own encoder, so every later request for the rate it is *already running* looks like a change and rebuilds again — on every reconnect, forever. Both ends reconcile: the phone settles `desiredFps` on `activeFps`, and the viewer persists the rate the phone reports rather than the one the operator asked for.
+
+NDI declares this rate on every frame (`setDeclaredFrameRate:`); a 60fps stream announced as 30 makes the receiver pace frames at half speed.
+
+## Two phones share the channel: the slow one sets the pace
+
+Latency that **grows over time** with both phones connected, and recovers when one disconnects, is airtime contention — not an encoder problem. `PIPE LATENCY` is camera→encoder and phone-local, so it is structurally blind to this; the tell is `SLOW WRITE` in `StreamingServer`.
+
+Both phones at HD on the same 5 GHz channel, measured: the S7 (195 Mbps link) logged **2,692 slow writes, mean 117 ms, max 1,765 ms** while the Pixel (390 Mbps) logged 63. The S7's struggling transmissions consume airtime and delay the *other* phone's packets. Dropping the S7 to SD cut it to ~100 and removed the Pixel's penalty entirely (92.3 ms with it connected vs 94.7 ms alone).
+
+Capping the socket send buffer at 64 KB is what makes this visible at all — otherwise auto-tuned kernel buffering absorbs a second of stale video while `write()` keeps returning instantly.
+
+## Viewer: the preview display path needs a drop policy too
+
+Every other per-frame path is bounded — NDI drops via a semaphore when busy, Syphon hands off an IOSurface with no copy — but `VideoView.display()` originally did an unbounded `DispatchQueue.main.async` per frame, and `enqueue` never checked `isReadyForMoreMediaData`. That is two unbounded queues in series: the main dispatch queue (each block retaining a `CVPixelBuffer`) and `AVSampleBufferDisplayLayer`'s own.
+
+Two phones at 30 + 60 fps put 90 blocks/sec on the main thread. Any shortfall makes both queues grow without bound, so the displayed image drifts steadily further behind and **never recovers on its own** — the reported "after a while, the viewer starts to lag", and consistent with an earlier observation that one pane caught up the moment the other phone disconnected.
+
+`VideoView` now coalesces: at most one frame pending for the main thread per view, newest wins, superseded frames dropped. A live preview only ever wants the most recent frame, so dropping one costs nothing visible while queuing it costs latency permanently.
+
+Note this is a *separate* mechanism from the airtime contention documented above; both are real, and they produce the same symptom. The tell for contention is `SLOW WRITE` on the phone, and for this one, a viewer that lags while the phones report healthy send paths.
+
+## Per-camera menus follow the camera
+
+The menu bar carries one menu per slot ("Camera A" / "Camera B"), each holding that phone's resolution, frame rate and stabilization; "Cameras" keeps only the global swap.
+
+Swapping slots has to move **every** per-camera cache with it — focus, stabilization, frame rate, battery, torch, active format, advertised formats, frame size — plus the persisted per-slot settings, so a reconnect re-applies what that camera actually had. Without it the titles and menu checkmarks keep describing the phone that used to occupy the slot, and stay wrong until a packet corrects them: up to a minute for battery, and never for stabilization or frame rate, which are only sent on connect or on change. `Browser.onSwap` fires after reassignment; in the single-feed case it is dispatched *before* the vacated slot's status clear so the clear lands on the empty slot rather than wiping the state just moved.
+
 ## Viewer: NDI output (optional, alongside Syphon)
 
 Syphon is the primary output and is always on: `publishPixelBuffer` binds the decoded frame's IOSurface directly as a GL texture — zero-copy, nothing re-encoded. NDI exists only for consumers that can't speak Syphon, and is off by default.

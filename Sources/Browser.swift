@@ -23,6 +23,10 @@ final class EpocCamBrowser {
     var onFocusState: ((CameraSlot, FocusState) -> Void)?
     // Fired on the main thread when a phone reports stabilization capability/state.
     var onStabilization: ((CameraSlot, StabilizationState) -> Void)?
+    var onFps: ((CameraSlot, FpsState) -> Void)?
+    // Fired after the slots have been reassigned, so the viewer can move each camera's
+    // cached state to the slot that camera now occupies.
+    var onSwap: (() -> Void)?
     // Compressed H.264 straight from the phone, for the NDI passthrough path. Delivered on
     // the connection queue, not the main thread — it is a high-rate data path.
     var onCompressedVideo: ((CameraSlot, Data, Bool, Data?) -> Void)?
@@ -136,6 +140,16 @@ final class EpocCamBrowser {
         }
     }
 
+    // Operator control: capture frame rate for this slot's phone. Persisted here (rather
+    // than at the call site) so it is remembered even if the phone is offline when set.
+    func setFps(slot: CameraSlot, fps: Int) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(fps, forKey: slot.frameRateKey)
+            self.conns.first { $0.slot == slot && $0.live }?.conn?.setFps(fps)
+        }
+    }
+
     // Operator control: electronic stabilization on/off for this slot's phone.
     func setStabilization(slot: CameraSlot, on: Bool) {
         queue.async { [weak self] in
@@ -174,6 +188,7 @@ final class EpocCamBrowser {
                 self.persistSlot(a); self.persistSlot(b)
                 NSLog("EpocCam: swapped — %@↔%@", sa.label, sb.label)
                 // Both panes stay filled; a fresh frame will refresh each.
+                DispatchQueue.main.async { self.onSwap?() }
             case 1:
                 let a = live[0]
                 let old = a.slot!
@@ -181,6 +196,10 @@ final class EpocCamBrowser {
                 a.slot = other
                 self.persistSlot(a)
                 NSLog("EpocCam: moved single feed %@ -> %@", old.label, other.label)
+                // Move the state first, then vacate: postStatus also hops to the main queue,
+                // so this ordering guarantees the clear lands on the now-empty slot rather
+                // than wiping the state we just moved onto the occupied one.
+                DispatchQueue.main.async { self.onSwap?() }
                 self.postStatus(old, "Searching for camera \(old.label)…")
             default:
                 NSLog("EpocCam: swap requested but no live feeds")
@@ -310,6 +329,10 @@ final class EpocCamBrowser {
             guard let self, let mc, let slot = mc.slot else { return }
             DispatchQueue.main.async { self.onStabilization?(slot, st) }
         }
+        c.onFps = { [weak self, weak mc] st in
+            guard let self, let mc, let slot = mc.slot else { return }
+            DispatchQueue.main.async { self.onFps?(slot, st) }
+        }
         c.onFocusState = { [weak self, weak mc] st in
             guard let self, let mc, let slot = mc.slot else { return }
             DispatchQueue.main.async { self.onFocusState?(slot, st) }
@@ -368,6 +391,13 @@ final class EpocCamBrowser {
         if UserDefaults.standard.bool(forKey: slot.stabilizationKey) {
             mc.conn?.setStabilization(on: true)
         }
+        // Same for frame rate — sent whenever one is remembered, including 30. Skipping the
+        // default would only be safe if the phone always came up at 30, but a phone whose app
+        // stayed running across a viewer restart keeps whatever rate it was last given, and
+        // would silently disagree with the setting shown here. Re-sending the current rate is
+        // free: the phone no-ops a request that matches, without rebuilding its encoder.
+        let savedFps = UserDefaults.standard.integer(forKey: slot.frameRateKey)
+        if savedFps > 0 { mc.conn?.setFps(savedFps) }
     }
 
     // Pick a slot for a device: its remembered slot if free, else the first free slot.

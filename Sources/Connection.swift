@@ -16,6 +16,7 @@ final class EpocCamConnection {
     var onFocusState: ((FocusState) -> Void)?
     // Called when the phone reports stabilization capability/state.
     var onStabilization: ((StabilizationState) -> Void)?
+    var onFps: ((FpsState) -> Void)?
     // The compressed H.264 exactly as the phone sent it, for the NDI passthrough path:
     // (annexB frame, isKeyframe, parameterSets for keyframes). Fires alongside decoding,
     // never instead of it — Syphon and the preview still need decoded frames.
@@ -168,6 +169,13 @@ final class EpocCamConnection {
                   st.oisSupported ? "y":"n", st.oisOn ? "y":"n")
             onStabilization?(st)
 
+        case PktType.fpsState.rawValue:
+            guard payload.count >= 2 else { break }
+            let st = FpsState(current: Int(payload[0]), supports60: payload[1] != 0)
+            NSLog("EpocCam: frame rate %dfps (60fps capable: %@)",
+                  st.current, st.supports60 ? "yes" : "no")
+            onFps?(st)
+
         case PktType.battery.rawValue:
             guard payload.count >= 2 else { break }
             let level = Int(payload[0])
@@ -207,6 +215,14 @@ final class EpocCamConnection {
         conn.send(content: Data.torchPacket(on: on), completion: .contentProcessed { err in
             if let err { NSLog("EpocCam: torch send error: %@", err.localizedDescription) }
             else { NSLog("EpocCam: torch %@ sent", on ? "ON" : "OFF") }
+        })
+    }
+
+    func setFps(_ fps: Int) {
+        guard live else { return }
+        conn.send(content: Data.fpsPacket(fps), completion: .contentProcessed { err in
+            if let err { NSLog("EpocCam: fps send error: %@", err.localizedDescription) }
+            else { NSLog("EpocCam: frame rate %dfps requested", fps) }
         })
     }
 

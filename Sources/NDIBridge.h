@@ -27,6 +27,11 @@
 // YES if this build can do H.264 passthrough at all.
 + (BOOL)supportsCompressed;
 
+// Frame rate declared on every outgoing NDI frame. Receivers clock off this, so it has to
+// follow the phone's actual capture rate rather than a hardcoded 30 — a 60fps stream
+// announced as 30 makes the consumer pace frames at half speed. Defaults to 30.
+- (void)setDeclaredFrameRate:(int)fps;
+
 - (void)stop;
 
 @end

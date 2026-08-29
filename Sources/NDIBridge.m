@@ -6,6 +6,9 @@
 #endif
 
 @implementation NDIBridge {
+    // Declared NDI frame rate as N/D. Kept in the 1001 family to match how this has always
+    // been sent; only the numerator moves with the capture rate.
+    int _rateN;
     NDIlib_send_instance_t _sender;
     NSLock *_lock;
     int64_t _frameIndex;   // drives monotonic pts/dts; only ordering matters to NDI
@@ -24,12 +27,20 @@
     return ok;
 }
 
+- (void)setDeclaredFrameRate:(int)fps {
+    if (fps <= 0) return;
+    [_lock lock];
+    _rateN = fps * 1000;   // paired with _D = 1001, matching how this has always been sent
+    [_lock unlock];
+}
+
 - (instancetype)initWithName:(NSString *)name {
     self = [super init];
     if (!self) return nil;
     if (![NDIBridge ensureRuntime]) return nil;
 
     _lock = [NSLock new];
+    _rateN = 30000;   // 30fps until a phone reports otherwise
 
     NDIlib_send_create_t desc;
     memset(&desc, 0, sizeof(desc));
@@ -63,7 +74,7 @@
     frame.xres                 = (int)CVPixelBufferGetWidth(pixelBuffer);
     frame.yres                 = (int)CVPixelBufferGetHeight(pixelBuffer);
     frame.FourCC               = NDIlib_FourCC_type_BGRA;   // matches VideoDecoder's output
-    frame.frame_rate_N         = 30000;
+    frame.frame_rate_N         = _rateN;
     frame.frame_rate_D         = 1001;
     frame.picture_aspect_ratio = 0.0f;                      // 0 = square pixels
     frame.frame_format_type    = NDIlib_frame_format_type_progressive;
@@ -131,7 +142,7 @@
     v.xres                 = width;
     v.yres                 = height;
     v.FourCC               = (NDIlib_FourCC_video_type_e)NDIlib_FourCC_video_type_ex_H264_highest_bandwidth;
-    v.frame_rate_N         = 30000;
+    v.frame_rate_N         = _rateN;
     v.frame_rate_D         = 1001;
     v.picture_aspect_ratio = 0.0f;
     v.frame_format_type    = NDIlib_frame_format_type_progressive;

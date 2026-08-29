@@ -22,6 +22,8 @@ enum CameraSlot: Int, CaseIterable {
     // Digital stabilization choice, persisted per slot and re-applied when a phone connects
     // — the same way the resolution choice is.
     var stabilizationKey: String { "EpocCamStabilization.\(label)" }
+    // Capture frame rate, persisted per slot and re-applied on connect — same as the two above.
+    var frameRateKey: String { "EpocCamFrameRate.\(label)" }
 
     static func from(role: String?) -> CameraSlot? {
         switch role?.lowercased() {
@@ -69,6 +71,15 @@ enum PktType: UInt32 {
     case focusState = 0x00020009  // phone -> viewer: what the phone's focus is actually doing
     case stabCmd    = 0x0002000A  // viewer -> phone: electronic stabilization on/off
     case stabState  = 0x0002000B  // phone -> viewer: stabilization capability + state
+    case fpsCmd     = 0x0002000C  // viewer -> phone: capture/encode frame rate
+    case fpsState   = 0x0002000D  // phone -> viewer: frame rate in use + 60fps capability
+}
+
+// Frame rate the phone actually settled on, plus whether it could do 60 at all — a camera
+// that can't sustain it gets the option greyed out rather than silently clamped.
+struct FpsState {
+    var current   = 30
+    var supports60 = false
 }
 
 struct PktHeader {
@@ -102,10 +113,9 @@ struct VideoFormat {
     let height: Int
     let fps:    Float
 
-    var label: String {
-        let fpsStr = fps > 0 ? " @ \(Int(fps))fps" : ""
-        return "\(width)×\(height)\(fpsStr)"
-    }
+    // Resolution only: the frame rate is a separate menu now, and repeating the
+    // connect-time rate here would contradict it the moment the operator changes it.
+    var label: String { "\(width)×\(height)" }
 }
 
 // Parse the formats from a capability packet payload.
@@ -191,6 +201,18 @@ extension Data {
         p.putLeU32(PktType.torch.rawValue,  at: 8)
         p.putLeU32(UInt32(244),             at: 12)  // remaining bytes
         p[16] = on ? 1 : 0
+        return p
+    }
+
+    // Build a frame-rate packet, viewer → phone. Same 256-byte shape as the others so the
+    // phone's fixed-offset read path stays uniform.
+    static func fpsPacket(_ fps: Int) -> Data {
+        var p = Data(count: 256)
+        p.putLeU32(kMagic,                   at: 0)
+        p.putLeU32(0,                        at: 4)
+        p.putLeU32(PktType.fpsCmd.rawValue,  at: 8)
+        p.putLeU32(UInt32(244),              at: 12)
+        p[16] = UInt8(clamping: fps)
         return p
     }
 

@@ -42,6 +42,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // particular camera can actually do rather than assuming.
     private var stabStates:     [CameraSlot: StabilizationState] = [:]
     private var stabItems:      [CameraSlot: NSMenuItem]  = [:]
+    private var fpsStates:      [CameraSlot: FpsState]    = [:]
+    // Kept rather than written straight into the label: the title now shows battery and
+    // frame rate together, and each arrives in its own packet, so whichever lands second
+    // would otherwise wipe the other.
+    private var batteryStates:  [CameraSlot: (level: Int, charging: Bool)] = [:]
+    private var fpsMenus:       [CameraSlot: NSMenu]      = [:]
     // What we last *asked* each phone to do. The phone doesn't acknowledge, so this tracks
     // the request, not confirmed hardware state.
     private var torchOn:        [CameraSlot: Bool]         = [:]
@@ -49,6 +55,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var alwaysOnTopItem: NSMenuItem?
     private static let kAlwaysOnTopKey = "EpocCamAlwaysOnTop"
     private var activeFormatIndex: [CameraSlot: Int] = [:]
+    // Last formats each phone advertised, kept so a swap can repopulate the other slot's
+    // resolution menu without waiting for that phone to announce itself again.
+    private var slotFormats: [CameraSlot: [VideoFormat]] = [:]
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard claimSingleInstance() else { return }
@@ -99,24 +108,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
-        // Resolution menu with one submenu per camera slot.
-        let resMenuItem = NSMenuItem()
-        resMenuItem.title = "Resolution"
-        mainMenu.addItem(resMenuItem)
-        let resMenu = NSMenu(title: "Resolution")
+        // One menu per camera slot. Every control that affects a single phone lives under
+        // that phone's own menu, rather than making the operator find the same camera again
+        // in a separate Resolution menu, Frame rate menu and Cameras menu.
         for slot in CameraSlot.allCases {
-            let slotItem = NSMenuItem(title: "Camera \(slot.label)", action: nil, keyEquivalent: "")
-            let slotMenu = NSMenu(title: "Camera \(slot.label)")
+            let camItem = NSMenuItem()
+            camItem.title = "Camera \(slot.label)"
+            mainMenu.addItem(camItem)
+            let menu = NSMenu(title: "Camera \(slot.label)")
+            menu.autoenablesItems = false
+
+            let resItem = NSMenuItem(title: "Resolution", action: nil, keyEquivalent: "")
+            let resMenu = NSMenu(title: "Resolution")
             let placeholder = NSMenuItem(title: "Connecting…", action: nil, keyEquivalent: "")
             placeholder.isEnabled = false
-            slotMenu.addItem(placeholder)
-            slotItem.submenu = slotMenu
-            resMenu.addItem(slotItem)
-            resolutionMenus[slot] = slotMenu
-        }
-        resMenuItem.submenu = resMenu
+            resMenu.addItem(placeholder)
+            resItem.submenu = resMenu
+            menu.addItem(resItem)
+            resolutionMenus[slot] = resMenu
 
-        // Cameras menu — operator swap control.
+            // 60fps trades per-frame quality (the same CBR bitrate spread over twice the
+            // frames) for roughly one 30fps frame interval of latency — an operator choice
+            // per camera, not a global default.
+            let fpsItem = NSMenuItem(title: "Frame rate", action: nil, keyEquivalent: "")
+            let fpsMenu = NSMenu(title: "Frame rate")
+            fpsMenu.autoenablesItems = false
+            for rate in [30, 60] {
+                let item = NSMenuItem(title: "\(rate) fps",
+                                      action: #selector(frameRateSelected(_:)), keyEquivalent: "")
+                item.tag = rate
+                item.representedObject = slot.rawValue
+                fpsMenu.addItem(item)
+            }
+            fpsItem.submenu = fpsMenu
+            menu.addItem(fpsItem)
+            fpsMenus[slot] = fpsMenu
+
+            menu.addItem(NSMenuItem.separator())
+            let stab = NSMenuItem(title: "Digital stabilization (crops the image)",
+                                  action: #selector(toggleStabilization(_:)), keyEquivalent: "")
+            stab.tag = slot.rawValue
+            stab.isEnabled = false      // until a phone reports it can do this
+            menu.addItem(stab)
+            stabItems[slot] = stab
+
+            camItem.submenu = menu
+            applyFrameRateMenu(slot)
+            applyStabilizationMenu(slot)
+        }
+
+        // Cameras menu — the one camera action that isn't per-slot.
         let camMenuItem = NSMenuItem()
         camMenuItem.title = "Cameras"
         mainMenu.addItem(camMenuItem)
@@ -124,20 +165,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         camMenu.addItem(withTitle: "Swap A ↔ B",
                         action: #selector(swapCameras(_:)),
                         keyEquivalent: "s")
-        camMenu.addItem(NSMenuItem.separator())
-        camMenu.autoenablesItems = false
-        let stabHdr = NSMenuItem(title: "Digital stabilization (crops the image)",
-                                 action: nil, keyEquivalent: "")
-        stabHdr.isEnabled = false
-        camMenu.addItem(stabHdr)
-        for slot in CameraSlot.allCases {
-            let item = NSMenuItem(title: "    Camera \(slot.label)",
-                                  action: #selector(toggleStabilization(_:)), keyEquivalent: "")
-            item.tag = slot.rawValue
-            item.isEnabled = false      // until a phone reports it can do this
-            camMenu.addItem(item)
-            stabItems[slot] = item
-        }
         camMenuItem.submenu = camMenu
 
         // Window menu — keep the viewer above Millumin while operating it.
@@ -217,6 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ndiQueues[slot] = DispatchQueue(label: "epoccam.ndi.\(slot.label)", qos: .userInitiated)
                 ndiGate[slot]   = DispatchSemaphore(value: 1)
                 ndiDropped[slot] = 0
+                if let fps = fpsStates[slot]?.current { b.setDeclaredFrameRate(Int32(fps)) }
                 ndiLock.lock(); ndi[slot] = b; ndiLock.unlock()
             }
         } else {
@@ -417,11 +445,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.isEnabled = st.eisSupported
         item.state = st.eisOn ? .on : .off
         // Say why it's unavailable rather than leaving a dead greyed row.
-        item.title = "    Camera \(slot.label)" + (st.eisSupported ? "" : " — not supported")
+        item.title = "Digital stabilization (crops the image)"
+                     + (st.eisSupported ? "" : " — not supported")
+    }
+
+    // "Camera A — ⚡85% · 60fps", with each part appearing only once that phone has
+    // reported it, so a slot that is still connecting doesn't show invented values.
+    private func applyTitle(_ slot: CameraSlot) {
+        var parts: [String] = []
+        if let b = batteryStates[slot] {
+            parts.append("\(b.charging ? "⚡" : "")\(b.level)%")
+        }
+        if let f = fpsStates[slot] {
+            parts.append("\(f.current)fps")
+        }
+        let suffix = parts.isEmpty ? "" : " — " + parts.joined(separator: " · ")
+        titleLabels[slot]?.stringValue = "Camera \(slot.label)\(suffix)"
+    }
+
+    @objc private func frameRateSelected(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? Int,
+              let slot = CameraSlot(rawValue: raw) else { return }
+        let rate = sender.tag
+        // Refuse a rate this phone reported it can't sustain, rather than sending a request
+        // that comes back clamped and leaves the menu disagreeing with the stream.
+        if rate >= 60, let st = fpsStates[slot], !st.supports60 { return }
+        browser.setFps(slot: slot, fps: rate)
+        NSLog("EpocCam[%@]: user selected %d fps", slot.label, rate)
+        // Optimistic check so the click registers immediately; the phone's fpsState packet
+        // corrects it if the encoder settled somewhere else.
+        applyFrameRateMenu(slot, pending: rate)
+    }
+
+    // `pending` shows a just-clicked rate before the phone has confirmed it.
+    private func applyFrameRateMenu(_ slot: CameraSlot, pending: Int? = nil) {
+        guard let menu = fpsMenus[slot] else { return }
+        let st = fpsStates[slot]
+        let saved = UserDefaults.standard.integer(forKey: slot.frameRateKey)
+        let current = pending ?? st?.current ?? (saved > 0 ? saved : 30)
+        // Until a phone reports in, leave 60 selectable: the remembered choice has to be
+        // clickable while the camera is still connecting, same as the resolution menu.
+        let allow60 = st?.supports60 ?? true
+        for item in menu.items {
+            item.state = item.tag == current ? .on : .off
+            item.isEnabled = item.tag < 60 || allow60
+            item.title = item.tag >= 60 && !allow60 ? "60 fps — not supported" : "\(item.tag) fps"
+        }
     }
 
     @objc private func swapCameras(_ sender: Any?) {
         browser.swapSlots()
+    }
+
+    // Swapping moves each phone to the other pane, so everything the operator sees for that
+    // camera has to travel with it. Without this the titles, menu checkmarks and overlay
+    // buttons keep describing the phone that *used* to be in the slot, and stay wrong until
+    // a packet happens to correct them — up to a minute for battery, and not at all for
+    // stabilization or frame rate, which are only sent on connect or on change.
+    private func handleSwap() {
+        let a = CameraSlot.a, b = CameraSlot.b
+        func exchange<T>(_ d: inout [CameraSlot: T]) { let t = d[a]; d[a] = d[b]; d[b] = t }
+        exchange(&focusStates)
+        exchange(&stabStates)
+        exchange(&fpsStates)
+        exchange(&batteryStates)
+        exchange(&torchOn)
+        exchange(&activeFormatIndex)
+        exchange(&slotFormats)
+        exchange(&lastFrameSize)
+
+        // The persisted settings follow the phone as well, so when it reconnects it is given
+        // the configuration it actually had rather than the other camera's.
+        let d = UserDefaults.standard
+        for (ka, kb) in [(a.lastFormatKey, b.lastFormatKey),
+                         (a.stabilizationKey, b.stabilizationKey),
+                         (a.frameRateKey, b.frameRateKey)] {
+            let va = d.object(forKey: ka), vb = d.object(forKey: kb)
+            if let vb { d.set(vb, forKey: ka) } else { d.removeObject(forKey: ka) }
+            if let va { d.set(va, forKey: kb) } else { d.removeObject(forKey: kb) }
+        }
+
+        for slot in CameraSlot.allCases {
+            applyTitle(slot)
+            applyFrameRateMenu(slot)
+            applyStabilizationMenu(slot)
+            applyFocusAppearance(slot)
+            applyLightAppearance(slot)
+            populateResolutionMenu(slot: slot, formats: slotFormats[slot] ?? [])
+            // NDI declares a frame rate per sender, and the senders stay with the slot.
+            ndiLock.lock(); let sink = ndi[slot]; ndiLock.unlock()
+            if let fps = fpsStates[slot]?.current { sink?.setDeclaredFrameRate(Int32(fps)) }
+        }
+        NSLog("EpocCam: swapped per-camera state and settings to follow the cameras")
     }
 
     // Called on the main thread when a slot's sender advertises its available formats.
@@ -429,6 +544,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let menu = resolutionMenus[slot] else { return }
         let active = activeFormatIndex[slot] ?? 0
         menu.removeAllItems()
+        guard !formats.isEmpty else {
+            let placeholder = NSMenuItem(title: "Connecting…", action: nil, keyEquivalent: "")
+            placeholder.isEnabled = false
+            menu.addItem(placeholder)
+            return
+        }
         for fmt in formats {
             let item = NSMenuItem(title: fmt.label,
                                   action: #selector(resolutionSelected(_:)),
@@ -547,6 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pane.translatesAutoresizingMaskIntoConstraints = false
 
         let videoView = VideoView(frame: .zero)
+        videoView.label = slot.label
         videoView.translatesAutoresizingMaskIntoConstraints = false
         pane.addSubview(videoView)
         NSLayoutConstraint.activate([
@@ -664,8 +786,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         browser = EpocCamBrowser()
         browser.onFormats = { [weak self] slot, formats in
-            DispatchQueue.main.async { self?.populateResolutionMenu(slot: slot, formats: formats) }
+            DispatchQueue.main.async {
+                self?.slotFormats[slot] = formats
+                self?.populateResolutionMenu(slot: slot, formats: formats)
+            }
         }
+        browser.onSwap = { [weak self] in self?.handleSwap() }
         browser.onStatus = { [weak self] slot, msg in
             // Already dispatched to the main thread by Browser.
             guard let self else { return }
@@ -675,6 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // drop the stale battery reading — it's a different phone by the time one reconnects.
             if msg.contains("Searching") || msg.contains("lost") {
                 self.videoViews[slot]?.clear()
+                self.batteryStates[slot] = nil
                 self.titleLabels[slot]?.stringValue = "Camera \(slot.label)"
                 self.torchOn[slot] = false
                 self.applyLightAppearance(slot)
@@ -682,6 +809,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.applyFocusAppearance(slot)
                 self.stabStates[slot] = StabilizationState()
                 self.applyStabilizationMenu(slot)
+                // Forget the departed phone's capability — the next one in this slot may
+                // not be able to do 60, and a stale "supported" would offer a dead option.
+                self.fpsStates[slot] = nil
+                self.applyFrameRateMenu(slot)
+                self.applyTitle(slot)
             }
         }
         // Only wire the compressed tap in builds that can use it. Connection.swift skips the
@@ -710,6 +842,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                   st.oisSupported ? (st.oisOn ? "on" : "available") : "unavailable",
                   st.eisSupported ? (st.eisOn ? "on" : "off") : "unavailable")
         }
+        browser.onFps = { [weak self] slot, st in
+            guard let self else { return }
+            self.fpsStates[slot] = st
+            // Converge the stored setting on what the phone actually runs at. Without this a
+            // pref holding a rate this phone can't reach (set before its capability was known)
+            // would be re-sent on every connect and rebuild its encoder every time.
+            UserDefaults.standard.set(st.current, forKey: slot.frameRateKey)
+            self.applyFrameRateMenu(slot)
+            self.applyTitle(slot)
+            // NDI receivers clock off the declared rate, so it has to track the real one.
+            self.ndiLock.lock(); let sink = self.ndi[slot]; self.ndiLock.unlock()
+            sink?.setDeclaredFrameRate(Int32(st.current))
+            NSLog("EpocCam[%@]: streaming at %d fps (60fps capable: %@)",
+                  slot.label, st.current, st.supports60 ? "yes" : "no")
+        }
         browser.onFocusState = { [weak self] slot, st in
             guard let self else { return }
             self.focusStates[slot] = st
@@ -717,12 +864,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         browser.onBattery = { [weak self] slot, level, charging in
             guard let self else { return }
-            let bolt = charging ? "⚡" : ""
-            self.titleLabels[slot]?.stringValue = "Camera \(slot.label) — \(bolt)\(level)%"
+            self.batteryStates[slot] = (level, charging)
+            self.applyTitle(slot)
         }
         browser.onFrame = { [weak self] slot, pixelBuffer in
             guard let self else { return }
             self.recordFrame(slot)
+            // Dispatched unconditionally on purpose: isHidden is AppKit state and must not
+            // be read off the main thread just to save a dispatch.
             DispatchQueue.main.async {
                 if let overlay = self.statusOverlays[slot], overlay.isHidden == false {
                     overlay.isHidden = true
