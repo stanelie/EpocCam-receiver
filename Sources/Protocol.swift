@@ -19,6 +19,9 @@ enum CameraSlot: Int, CaseIterable {
     // used to live here too, for the "last-known host" fast-start probe that was removed
     // — it raced mDNS and opened a second socket to the same phone. Nothing read them.)
     var lastFormatKey: String { "EpocCamLastFormat.\(label)" }
+    // Digital stabilization choice, persisted per slot and re-applied when a phone connects
+    // — the same way the resolution choice is.
+    var stabilizationKey: String { "EpocCamStabilization.\(label)" }
 
     static func from(role: String?) -> CameraSlot? {
         switch role?.lowercased() {

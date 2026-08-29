@@ -126,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         keyEquivalent: "s")
         camMenu.addItem(NSMenuItem.separator())
         camMenu.autoenablesItems = false
-        let stabHdr = NSMenuItem(title: "Digital stabilization (crops; may add latency)",
+        let stabHdr = NSMenuItem(title: "Digital stabilization (crops the image)",
                                  action: nil, keyEquivalent: "")
         stabHdr.isEnabled = false
         camMenu.addItem(stabHdr)
@@ -404,8 +404,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let slot = CameraSlot(rawValue: sender.tag) else { return }
         let st = stabStates[slot] ?? StabilizationState()
         guard st.eisSupported else { return }
-        browser.setStabilization(slot: slot, on: !st.eisOn)
-        NSLog("EpocCam[%@]: digital stabilization %@ requested", slot.label, st.eisOn ? "OFF" : "ON")
+        let want = !st.eisOn
+        UserDefaults.standard.set(want, forKey: slot.stabilizationKey)   // survives restarts
+        browser.setStabilization(slot: slot, on: want)
+        NSLog("EpocCam[%@]: digital stabilization %@ requested", slot.label, want ? "ON" : "OFF")
         // No optimistic update — the phone reports back what it actually applied.
     }
 

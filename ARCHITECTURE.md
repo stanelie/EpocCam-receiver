@@ -76,6 +76,44 @@ Feeding the camera straight into `MediaCodec.createInputSurface()` is the docume
 
 The general lesson: this is a **vendor driver** workaround, so it must be gated on the vendor. An OS-version gate is not a proxy for a hardware quirk — the two phones in use here (a Qualcomm Pixel 5 and an Exynos S6) happen to share an API level while needing opposite capture paths.
 
+## Stabilization: OIS free, EIS needs the video-encode flag
+
+**Optical (OIS) is always on** where the camera has it, with no toggle: it moves a lens element, so there is no crop and nothing is buffered. Previously `LENS_OPTICAL_STABILIZATION_MODE` was never set at all, leaving it to whatever `TEMPLATE_RECORD` defaulted to on each HAL.
+
+**Electronic (EIS) is a per-camera toggle**, persisted per slot and re-applied on connect like the resolution choice. It crops, which is the only reason it isn't simply on.
+
+Confirmed against the hardware — and note capability is *reported by the phone*, never assumed by the viewer, so the menu disables itself on a camera that can't do it:
+
+| Device | Back camera | OIS | EIS |
+| --- | --- | --- | --- |
+| Galaxy S7 | main | yes | **no** |
+| Pixel 5 | main | yes | yes |
+
+### The trap: the HAL accepts EIS and silently ignores it
+
+`CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE` reports `1` when we request `1` — whether or not stabilization is actually happening. On the Pixel it reported enabled while producing **no crop and no smoothing**. Requesting it is not evidence it is working; the visible tell is the crop.
+
+The cause: **the HAL only applies EIS to a stream whose buffer usage includes `USAGE_VIDEO_ENCODE`.** Our `ImageReader` was created with `USAGE_GPU_SAMPLED_IMAGE` alone, so EIS had no video stream to act on.
+
+### Why this looked like an unavoidable tradeoff, and wasn't
+
+`USAGE_VIDEO_ENCODE` is the same flag implicated in the ~500 ms Qualcomm stall documented above, so the obvious reading was that EIS and low latency are mutually exclusive on these devices. Measured, they are not — the two are separable:
+
+- the **latency bug** belongs to `MediaCodec.createInputSurface()` specifically;
+- **EIS** keys on the *usage flag* of the camera's output stream.
+
+So adding `USAGE_VIDEO_ENCODE` to the `ImageReader`, while still feeding the encoder through `ImageWriter` rather than its input surface, gives EIS **and** keeps latency low. Measured on a Pixel 5:
+
+| Path | EIS works | Camera→encoder latency |
+| --- | --- | --- |
+| ImageReader, `GPU_SAMPLED` only | no | ~100 ms |
+| Direct encoder input surface | yes | ~490 ms |
+| **ImageReader + `VIDEO_ENCODE`** | **yes** | **~85 ms** |
+
+EIS itself costs no measurable latency on any path (100.5 ms mean across off/on/off on the fast path) — the penalty was always the capture path, never the stabilization.
+
+`CameraEncoder` logs what the HAL actually applied (`APPLIED: videoStab=… ois=…`, rate-limited), which is what separated "the HAL refused" from "the HAL accepted and did nothing".
+
 ## Viewer: NDI output (optional, alongside Syphon)
 
 Syphon is the primary output and is always on: `publishPixelBuffer` binds the decoded frame's IOSurface directly as a GL texture — zero-copy, nothing re-encoded. NDI exists only for consumers that can't speak Syphon, and is off by default.

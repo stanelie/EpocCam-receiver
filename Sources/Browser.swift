@@ -363,6 +363,11 @@ final class EpocCamBrowser {
         // Apply this slot's remembered resolution to the freshly bound phone.
         let fmt = UserDefaults.standard.integer(forKey: slot.lastFormatKey)
         if fmt > 0 { mc.conn?.selectFormat(index: fmt) }
+        // Same for stabilization. Sent unconditionally: a phone without EIS logs and ignores
+        // it, and reports its real capability back regardless.
+        if UserDefaults.standard.bool(forKey: slot.stabilizationKey) {
+            mc.conn?.setStabilization(on: true)
+        }
     }
 
     // Pick a slot for a device: its remembered slot if free, else the first free slot.
