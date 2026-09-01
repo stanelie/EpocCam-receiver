@@ -493,6 +493,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // Bright red while this app is frontmost, normal otherwise. Keyed to application
+    // activation rather than window key state: the question being answered is "are my
+    // keystrokes going to this app instead of Millumin", which is an app-level fact.
+    private static let focusRed = NSColor(srgbRed: 0.95, green: 0.05, blue: 0.05, alpha: 1.0)
+
+    private func applyFocusHighlight() {
+        guard let window else { return }
+        let active = NSApp.isActive
+        window.backgroundColor = active ? Self.focusRed : .windowBackgroundColor
+        NSLog("EpocCam: window focus %@ — titlebar %@",
+              active ? "GAINED" : "lost", active ? "RED" : "normal")
+    }
+
     @objc private func swapCameras(_ sender: Any?) {
         browser.swapSlots()
     }
@@ -584,6 +597,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
 
         let content = window.contentView!
+        // Focus alarm: the titlebar goes bright red whenever this app is frontmost, so it is
+        // obvious at a glance during a show that keystrokes are going here and not to
+        // Millumin. A transparent titlebar draws the window's background colour, which is how
+        // the red gets there — but the content view does not cover every pixel below it (the
+        // 30pt title row and the 2pt seam between panes both show window background), so give
+        // the content its own opaque layer or the red bleeds into the status row and straight
+        // down between the two video panes.
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        window.titlebarAppearsTransparent = true
+        for name in [NSApplication.didBecomeActiveNotification,
+                     NSApplication.didResignActiveNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
+                [weak self] _ in self?.applyFocusHighlight()
+            }
+        }
+        applyFocusHighlight()
 
         // Title row above the panes: one label per slot ("Camera A — 82%"), same column
         // widths as the video stack below so each title sits above its own pane.
@@ -626,7 +656,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // match the title bar.
         swap.isBordered = false
         swap.wantsLayer = true
-        swap.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.14).cgColor
+        swap.layer?.backgroundColor = NSColor.systemOrange.cgColor
         swap.contentTintColor = .white
         swap.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         swap.translatesAutoresizingMaskIntoConstraints = false
