@@ -24,6 +24,7 @@ final class EpocCamBrowser {
     // Fired on the main thread when a phone reports stabilization capability/state.
     var onStabilization: ((CameraSlot, StabilizationState) -> Void)?
     var onFps: ((CameraSlot, FpsState) -> Void)?
+    var onCameraFacing: ((CameraSlot, CameraFacingState) -> Void)?
     // Fired after the slots have been reassigned, so the viewer can move each camera's
     // cached state to the slot that camera now occupies.
     var onSwap: (() -> Void)?
@@ -137,6 +138,15 @@ final class EpocCamBrowser {
             guard let self else { return }
             UserDefaults.standard.set(index, forKey: slot.lastFormatKey)
             self.conns.first { $0.slot == slot && $0.live }?.conn?.selectFormat(index: index)
+        }
+    }
+
+    // Operator control: front or back camera for this slot's phone.
+    func setCameraFacing(slot: CameraSlot, front: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            UserDefaults.standard.set(front, forKey: slot.cameraFacingKey)
+            self.conns.first { $0.slot == slot && $0.live }?.conn?.setCameraFacing(front: front)
         }
     }
 
@@ -329,6 +339,10 @@ final class EpocCamBrowser {
             guard let self, let mc, let slot = mc.slot else { return }
             DispatchQueue.main.async { self.onStabilization?(slot, st) }
         }
+        c.onCameraFacing = { [weak self, weak mc] st in
+            guard let self, let mc, let slot = mc.slot else { return }
+            DispatchQueue.main.async { self.onCameraFacing?(slot, st) }
+        }
         c.onFps = { [weak self, weak mc] st in
             guard let self, let mc, let slot = mc.slot else { return }
             DispatchQueue.main.async { self.onFps?(slot, st) }
@@ -398,6 +412,14 @@ final class EpocCamBrowser {
         // free: the phone no-ops a request that matches, without rebuilding its encoder.
         let savedFps = UserDefaults.standard.integer(forKey: slot.frameRateKey)
         if savedFps > 0 { mc.conn?.setFps(savedFps) }
+        // Camera facing, sent only if the operator has actually chosen one for this slot.
+        // The phone persists its own choice as well, so "never set here" has to mean "leave
+        // the phone's preset alone" — testing the bool would instead force every phone to the
+        // rear camera on connect, and testing it only for `true` would make choosing "back"
+        // in the viewer silently fail to override a phone preset. Presence is the question.
+        if let front = UserDefaults.standard.object(forKey: slot.cameraFacingKey) as? Bool {
+            mc.conn?.setCameraFacing(front: front)
+        }
     }
 
     // Pick a slot for a device: its remembered slot if free, else the first free slot.

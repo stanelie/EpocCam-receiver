@@ -24,6 +24,8 @@ enum CameraSlot: Int, CaseIterable {
     var stabilizationKey: String { "EpocCamStabilization.\(label)" }
     // Capture frame rate, persisted per slot and re-applied on connect — same as the two above.
     var frameRateKey: String { "EpocCamFrameRate.\(label)" }
+    // Front/back camera choice, persisted per slot and re-applied on connect — same as above.
+    var cameraFacingKey: String { "EpocCamCameraFacing.\(label)" }
 
     static func from(role: String?) -> CameraSlot? {
         switch role?.lowercased() {
@@ -73,6 +75,16 @@ enum PktType: UInt32 {
     case stabState  = 0x0002000B  // phone -> viewer: stabilization capability + state
     case fpsCmd     = 0x0002000C  // viewer -> phone: capture/encode frame rate
     case fpsState   = 0x0002000D  // phone -> viewer: frame rate in use + 60fps capability
+    case cameraCmd  = 0x0002000E  // viewer -> phone: front or back camera
+    case cameraState = 0x0002000F // phone -> viewer: camera in use + what the device has
+}
+
+// Which camera the phone actually has open, and which ones it has at all — a phone with no
+// front camera gets the control disabled rather than a button that silently does nothing.
+struct CameraFacingState {
+    var front          = false
+    var frontAvailable = false
+    var backAvailable  = true
 }
 
 // Frame rate the phone actually settled on, plus whether it could do 60 at all — a camera
@@ -213,6 +225,17 @@ extension Data {
         p.putLeU32(PktType.fpsCmd.rawValue,  at: 8)
         p.putLeU32(UInt32(244),              at: 12)
         p[16] = UInt8(clamping: fps)
+        return p
+    }
+
+    // Build a camera-select packet, viewer → phone. Same 256-byte shape as the others.
+    static func cameraPacket(front: Bool) -> Data {
+        var p = Data(count: 256)
+        p.putLeU32(kMagic,                     at: 0)
+        p.putLeU32(0,                          at: 4)
+        p.putLeU32(PktType.cameraCmd.rawValue, at: 8)
+        p.putLeU32(UInt32(244),                at: 12)
+        p[16] = front ? 1 : 0
         return p
     }
 

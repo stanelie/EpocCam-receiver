@@ -43,6 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var stabStates:     [CameraSlot: StabilizationState] = [:]
     private var stabItems:      [CameraSlot: NSMenuItem]  = [:]
     private var fpsStates:      [CameraSlot: FpsState]    = [:]
+    private var cameraStates:   [CameraSlot: CameraFacingState] = [:]
+    private var cameraButtons:  [CameraSlot: NSButton]    = [:]
     // Kept rather than written straight into the label: the title now shows battery and
     // frame rate together, and each arrives in its own packet, so whichever lands second
     // would otherwise wipe the other.
@@ -506,6 +508,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               active ? "GAINED" : "lost", active ? "RED" : "normal")
     }
 
+    @objc private func toggleCameraFacing(_ sender: NSButton) {
+        guard let slot = CameraSlot(rawValue: sender.tag) else { return }
+        let st = cameraStates[slot] ?? CameraFacingState()
+        let want = !st.front
+        // Don't offer a camera this phone doesn't have.
+        if want && !st.frontAvailable { return }
+        if !want && !st.backAvailable { return }
+        browser.setCameraFacing(slot: slot, front: want)
+        NSLog("EpocCam[%@]: %@ camera requested", slot.label, want ? "front" : "back")
+        // No optimistic update — the phone reports back which camera it actually opened.
+    }
+
+    private func applyCameraAppearance(_ slot: CameraSlot) {
+        guard let b = cameraButtons[slot] else { return }
+        let st = cameraStates[slot] ?? CameraFacingState()
+        setOverlayTitle(b, st.front ? "front\ncamera" : "back\ncamera")
+        // A phone with only one camera gets a dimmed, inert button rather than one that
+        // looks live and does nothing.
+        let canSwitch = st.frontAvailable && st.backAvailable
+        b.isEnabled = canSwitch
+        b.alphaValue = canSwitch ? 1.0 : 0.4
+    }
+
     @objc private func swapCameras(_ sender: Any?) {
         browser.swapSlots()
     }
@@ -521,6 +546,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exchange(&focusStates)
         exchange(&stabStates)
         exchange(&fpsStates)
+        exchange(&cameraStates)
         exchange(&batteryStates)
         exchange(&torchOn)
         exchange(&activeFormatIndex)
@@ -532,7 +558,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let d = UserDefaults.standard
         for (ka, kb) in [(a.lastFormatKey, b.lastFormatKey),
                          (a.stabilizationKey, b.stabilizationKey),
-                         (a.frameRateKey, b.frameRateKey)] {
+                         (a.frameRateKey, b.frameRateKey),
+                         (a.cameraFacingKey, b.cameraFacingKey)] {
             let va = d.object(forKey: ka), vb = d.object(forKey: kb)
             if let vb { d.set(vb, forKey: ka) } else { d.removeObject(forKey: ka) }
             if let va { d.set(va, forKey: kb) } else { d.removeObject(forKey: kb) }
@@ -543,6 +570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             applyFrameRateMenu(slot)
             applyStabilizationMenu(slot)
             applyFocusAppearance(slot)
+            applyCameraAppearance(slot)
             applyLightAppearance(slot)
             populateResolutionMenu(slot: slot, formats: slotFormats[slot] ?? [])
             // NDI declares a frame rate per sender, and the senders stay with the slot.
@@ -772,12 +800,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refocus.heightAnchor.constraint(equalToConstant: 38),
         ])
 
+        // Front/back camera, under the light button. Like the focus control, its label is
+        // driven by what the phone reports rather than by what was requested, so the two
+        // always agree — including when a phone without a front camera falls back.
+        let cam = makeOverlayButton(title: "back\ncamera",
+                                    action: #selector(toggleCameraFacing(_:)), slot: slot)
+        pane.addSubview(cam)
+        NSLayoutConstraint.activate([
+            cam.topAnchor.constraint(equalTo: light.bottomAnchor, constant: 6),
+            cam.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -8),
+            cam.widthAnchor.constraint(equalToConstant: 76),
+            cam.heightAnchor.constraint(equalToConstant: 38),
+        ])
+
         videoViews[slot]     = videoView
         statusLabels[slot]   = label
         statusOverlays[slot] = pill
         lightButtons[slot]   = light
         focusButtons[slot]   = focus
         refocusButtons[slot] = refocus
+        cameraButtons[slot]  = cam
+        applyCameraAppearance(slot)
         focusStates[slot]    = .auto
         applyFocusAppearance(slot)
         torchOn[slot]        = false
@@ -843,6 +886,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // not be able to do 60, and a stale "supported" would offer a dead option.
                 self.fpsStates[slot] = nil
                 self.applyFrameRateMenu(slot)
+                self.cameraStates[slot] = nil
+                self.applyCameraAppearance(slot)
                 self.applyTitle(slot)
             }
         }
@@ -871,6 +916,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSLog("EpocCam[%@]: OIS %@, EIS %@", slot.label,
                   st.oisSupported ? (st.oisOn ? "on" : "available") : "unavailable",
                   st.eisSupported ? (st.eisOn ? "on" : "off") : "unavailable")
+        }
+        browser.onCameraFacing = { [weak self] slot, st in
+            guard let self else { return }
+            self.cameraStates[slot] = st
+            // Converge the stored setting on the camera the phone actually opened, so a
+            // fallback isn't re-requested on every reconnect.
+            UserDefaults.standard.set(st.front, forKey: slot.cameraFacingKey)
+            self.applyCameraAppearance(slot)
+            NSLog("EpocCam[%@]: %@ camera (front available: %@)",
+                  slot.label, st.front ? "front" : "back", st.frontAvailable ? "yes" : "no")
         }
         browser.onFps = { [weak self] slot, st in
             guard let self else { return }

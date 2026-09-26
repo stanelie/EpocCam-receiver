@@ -17,6 +17,7 @@ final class EpocCamConnection {
     // Called when the phone reports stabilization capability/state.
     var onStabilization: ((StabilizationState) -> Void)?
     var onFps: ((FpsState) -> Void)?
+    var onCameraFacing: ((CameraFacingState) -> Void)?
     // The compressed H.264 exactly as the phone sent it, for the NDI passthrough path:
     // (annexB frame, isKeyframe, parameterSets for keyframes). Fires alongside decoding,
     // never instead of it — Syphon and the preview still need decoded frames.
@@ -176,6 +177,15 @@ final class EpocCamConnection {
                   st.current, st.supports60 ? "yes" : "no")
             onFps?(st)
 
+        case PktType.cameraState.rawValue:
+            guard payload.count >= 3 else { break }
+            let st = CameraFacingState(front: payload[0] != 0,
+                                       frontAvailable: payload[1] != 0,
+                                       backAvailable: payload[2] != 0)
+            NSLog("EpocCam: camera %@ (front available: %@)",
+                  st.front ? "FRONT" : "BACK", st.frontAvailable ? "yes" : "no")
+            onCameraFacing?(st)
+
         case PktType.battery.rawValue:
             guard payload.count >= 2 else { break }
             let level = Int(payload[0])
@@ -215,6 +225,14 @@ final class EpocCamConnection {
         conn.send(content: Data.torchPacket(on: on), completion: .contentProcessed { err in
             if let err { NSLog("EpocCam: torch send error: %@", err.localizedDescription) }
             else { NSLog("EpocCam: torch %@ sent", on ? "ON" : "OFF") }
+        })
+    }
+
+    func setCameraFacing(front: Bool) {
+        guard live else { return }
+        conn.send(content: Data.cameraPacket(front: front), completion: .contentProcessed { err in
+            if let err { NSLog("EpocCam: camera send error: %@", err.localizedDescription) }
+            else { NSLog("EpocCam: %@ camera requested", front ? "front" : "back") }
         })
     }
 
