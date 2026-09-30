@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var focusButtons:   [CameraSlot: NSButton]     = [:]
     private var refocusButtons: [CameraSlot: NSButton]     = [:]
     // Reported by the phone, never inferred here — the button mirrors the phone.
-    private var focusStates:    [CameraSlot: FocusState]   = [:]
+    private var focusStates:    [CameraSlot: FocusStatus]  = [:]
     // Reported by the phone: capability travels with state, so the menu reflects what this
     // particular camera can actually do rather than assuming.
     private var stabStates:     [CameraSlot: StabilizationState] = [:]
@@ -394,7 +394,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleFocusMode(_ sender: NSButton) {
         guard let slot = CameraSlot(rawValue: sender.tag) else { return }
-        let goingManual = !(focusStates[slot] ?? .auto).isManual
+        // Don't ask a camera that cannot focus, or one that hasn't reported yet. The button
+        // is dimmed and inert in both cases, so this only catches a press that raced the
+        // state packet.
+        guard let st = focusStates[slot], st.afSupported else { return }
+        let goingManual = !st.state.isManual
         browser.sendFocusCommand(slot: slot, goingManual ? .manual : .auto)
         NSLog("EpocCam[%@]: focus %@ requested", slot.label, goingManual ? "MANUAL" : "AUTO")
         // Deliberately no optimistic update: the phone reports the real state back, and
@@ -403,14 +407,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func triggerRefocus(_ sender: NSButton) {
         guard let slot = CameraSlot(rawValue: sender.tag) else { return }
+        guard focusStates[slot]?.afSupported == true else { return }
         browser.sendFocusCommand(slot: slot, .refocus)
         NSLog("EpocCam[%@]: refocus requested", slot.label)
     }
 
     private func applyFocusAppearance(_ slot: CameraSlot) {
-        let st = focusStates[slot] ?? .auto
-        if let b = focusButtons[slot] { setOverlayTitle(b, st.label) }
-        refocusButtons[slot]?.isHidden = !st.isManual
+        // An absent entry means no phone has reported yet, which is not the same as a phone
+        // reporting that it cannot focus: the first shows the neutral label dimmed (as the
+        // camera button does before a phone says which cameras it has), the second says
+        // "fixed focus" outright.
+        let st = focusStates[slot]
+        let canFocus = st?.afSupported ?? false
+        if let b = focusButtons[slot] {
+            setOverlayTitle(b, st?.label ?? FocusState.auto.label)
+            // A fixed-focus camera gets a dimmed, inert button rather than one that looks
+            // live and does nothing — same treatment as a phone with only one camera. The
+            // capability is per-camera, so switching to the front camera can dim this
+            // button and switching back can restore it.
+            b.isEnabled = canFocus
+            b.alphaValue = canFocus ? 1.0 : 0.4
+        }
+        refocusButtons[slot]?.isHidden = !canFocus || !(st?.state.isManual ?? false)
     }
 
     @objc private func toggleLight(_ sender: NSButton) {
@@ -821,7 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refocusButtons[slot] = refocus
         cameraButtons[slot]  = cam
         applyCameraAppearance(slot)
-        focusStates[slot]    = .auto
+        focusStates[slot]    = nil   // nothing reported yet — the button stays inert
         applyFocusAppearance(slot)
         torchOn[slot]        = false
         applyLightAppearance(slot)
@@ -878,7 +896,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.titleLabels[slot]?.stringValue = "Camera \(slot.label)"
                 self.torchOn[slot] = false
                 self.applyLightAppearance(slot)
-                self.focusStates[slot] = .auto
+                // Forget the departed phone's focus capability along with its state: the
+                // next phone in this slot may be fixed-focus, and a stale "supported" would
+                // offer a dead button.
+                self.focusStates[slot] = nil
                 self.applyFocusAppearance(slot)
                 self.stabStates[slot] = StabilizationState()
                 self.applyStabilizationMenu(slot)

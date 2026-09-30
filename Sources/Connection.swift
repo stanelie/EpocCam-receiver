@@ -12,8 +12,8 @@ final class EpocCamConnection {
     var onFormats:    (([VideoFormat]) -> Void)?
     // Called whenever a battery packet arrives: (level 0-100, charging).
     var onBattery:    ((Int, Bool) -> Void)?
-    // Called whenever the phone reports what its focus is doing.
-    var onFocusState: ((FocusState) -> Void)?
+    // Called whenever the phone reports what its focus is doing, and whether it can focus.
+    var onFocusState: ((FocusStatus) -> Void)?
     // Called when the phone reports stabilization capability/state.
     var onStabilization: ((StabilizationState) -> Void)?
     var onFps: ((FpsState) -> Void)?
@@ -157,8 +157,14 @@ final class EpocCamConnection {
             forwardCompressed(payload: payload, flags: header.flags)
 
         case PktType.focusState.rawValue:
-            guard payload.count >= 1, let st = FocusState(rawValue: Int(payload[0])) else { break }
-            NSLog("EpocCam: focus state: %d", st.rawValue)
+            guard payload.count >= 1, let state = FocusState(rawValue: Int(payload[0])) else { break }
+            // Byte [1] was padding before the capability was reported, so a phone that
+            // predates it sends 0 and reads as fixed-focus: the control is greyed rather
+            // than offered and dead.
+            let st = FocusStatus(state: state,
+                                 afSupported: payload.count >= 2 && payload[1] != 0)
+            NSLog("EpocCam: focus state: %d (autofocus: %@)",
+                  st.state.rawValue, st.afSupported ? "yes" : "no")
             onFocusState?(st)
 
         case PktType.stabState.rawValue:

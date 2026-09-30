@@ -20,7 +20,7 @@ final class EpocCamBrowser {
     // Fired on the main thread whenever a phone reports its battery: (level 0-100, charging).
     var onBattery: ((CameraSlot, Int, Bool) -> Void)?
     // Fired on the main thread when a phone reports its focus state.
-    var onFocusState: ((CameraSlot, FocusState) -> Void)?
+    var onFocusState: ((CameraSlot, FocusStatus) -> Void)?
     // Fired on the main thread when a phone reports stabilization capability/state.
     var onStabilization: ((CameraSlot, StabilizationState) -> Void)?
     var onFps: ((CameraSlot, FpsState) -> Void)?

@@ -53,6 +53,21 @@ enum FocusState: Int {
     var isManual: Bool { self != .auto }
 }
 
+// What a phone reports about its focus. Capability travels with state, as it does for
+// stabilization, frame rate and camera facing: a fixed-focus camera (the S7-class front
+// ones) has no lock to take, so the control is greyed out rather than offered and left to
+// silently do nothing. A phone predating the capability byte reports 0 and so reads as
+// fixed-focus — the safe way round, since the alternative offers a dead button.
+struct FocusStatus {
+    var state       = FocusState.auto
+    var afSupported = false
+
+    // The button label, including the fixed-focus case, worded as the phone's own button
+    // words it so the two read identically.
+    var label: String { afSupported ? state.label : FocusStatus.fixedLabel }
+    static let fixedLabel = "fixed\nfocus"
+}
+
 // What a phone reports about its stabilization. Capability travels with state so the viewer
 // can hide the control on a camera that can't do it, rather than offering a dead button.
 struct StabilizationState {
