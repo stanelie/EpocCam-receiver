@@ -118,6 +118,7 @@ lipo -create \
 
 echo "==> Copying Info.plist"
 cp "$PROJ/Resources/Info.plist" "$APP/Contents/Info.plist"
+cp "$PROJ/Resources/AppIcon.icns" "$RES/"
 
 echo ""
 lipo -info "$MACOS/EpocCamViewer"

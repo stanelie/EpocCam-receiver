@@ -8,6 +8,8 @@
     <string>EpocCam Viewer</string>
     <key>CFBundleDisplayName</key>
     <string>EpocCam Viewer</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>EpocCamViewer</string>
     <key>CFBundlePackageType</key>
